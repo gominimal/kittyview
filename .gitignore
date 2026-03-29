@@ -1,0 +1,30 @@
+# Rust
+/target
+/.cargo/config.toml
+**/*.rs.bk
+*.pdb
+
+# Cargo lock is intentionally tracked for binary crates
+
+# Editors
+*~
+*.swp
+*.swo
+\#*\#
+.\#*
+.*.kate-swp
+
+# IDE / tool directories
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sandbox / dev environment
+/.claude/
+/CLAUDE.md
+
+
