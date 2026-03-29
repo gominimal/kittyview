@@ -6,7 +6,7 @@ mod svg;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use std::fs;
-use std::io::{self, Cursor, IsTerminal, Write};
+use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -94,6 +94,43 @@ fn load_image_as_png(
     Ok(buf.into_inner())
 }
 
+/// Check whether raw data looks like SVG (content sniffing only, no extension).
+fn is_svg_data(data: &[u8]) -> bool {
+    let head = &data[..data.len().min(1024)];
+    let head_str = String::from_utf8_lossy(head);
+    head_str.contains("<svg") || head_str.contains("<!DOCTYPE svg")
+}
+
+/// Read stdin and produce PNG bytes.
+/// Uses content sniffing for format detection since there is no filename.
+/// For SVGs, CWD is used as the base for resolving relative resource paths.
+fn load_stdin_as_png(svg_resources: svg::SvgResources) -> Result<Vec<u8>, String> {
+    let mut data = Vec::new();
+    io::stdin()
+        .lock()
+        .read_to_end(&mut data)
+        .map_err(|e| format!("Failed to read stdin: {e}"))?;
+
+    if data.is_empty() {
+        return Err("No data received on stdin".to_string());
+    }
+
+    if is_svg_data(&data) {
+        // Use CWD as a synthetic path so resources_dir resolves relative refs from there
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .join("stdin.svg");
+        return svg::render_svg_to_png(&data, &cwd, svg_resources);
+    }
+
+    let img = image::load_from_memory(&data)
+        .map_err(|e| format!("Failed to decode image from stdin: {e}"))?;
+    let mut buf = Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode PNG: {e}"))?;
+    Ok(buf.into_inner())
+}
+
 /// Write bytes to a file or stdout.
 fn write_output(data: &[u8], path: Option<&std::path::Path>) -> Result<(), String> {
     match path {
@@ -150,6 +187,9 @@ fn run() -> Result<(), String> {
             let png = match (input, logo) {
                 (_, true) => logo::generate_logo_png(),
                 (Some(path), false) => load_image_as_png(&path, cli.svg_resources)?,
+                (None, false) if !io::stdin().is_terminal() => {
+                    load_stdin_as_png(cli.svg_resources)?
+                }
                 (None, false) => {
                     return Err("Provide an input file or use --logo".to_string());
                 }
@@ -162,11 +202,14 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         None => {
-            let path = cli
-                .file
-                .ok_or_else(|| "No image file specified. Use --help for usage.".to_string())?;
+            let png = match cli.file {
+                Some(path) => load_image_as_png(&path, cli.svg_resources)?,
+                None if !io::stdin().is_terminal() => load_stdin_as_png(cli.svg_resources)?,
+                None => {
+                    return Err("No image file specified. Use --help for usage.".to_string());
+                }
+            };
             check_terminal(cli.force)?;
-            let png = load_image_as_png(&path, cli.svg_resources)?;
             let mut stdout = io::stdout().lock();
             kitty::display_png(&png, &mut stdout).map_err(|e| format!("Failed to write: {e}"))?;
             writeln!(stdout).map_err(|e| format!("Failed to write: {e}"))?;
@@ -201,6 +244,24 @@ mod tests {
         assert!(!is_svg(Path::new("photo.png"), b"\x89PNG\r\n\x1a\n"));
         assert!(!is_svg(Path::new("image.jpg"), b"\xff\xd8\xff"));
         assert!(!is_svg(Path::new("file.txt"), b"just some text"));
+    }
+
+    // --- is_svg_data (content-only sniffing for stdin) ---
+
+    #[test]
+    fn svg_data_detected_by_content() {
+        assert!(is_svg_data(b"<svg xmlns='http://www.w3.org/2000/svg'>"));
+        assert!(is_svg_data(b"<?xml version='1.0'?><svg>"));
+        assert!(is_svg_data(b"<!DOCTYPE svg PUBLIC"));
+    }
+
+    #[test]
+    fn non_svg_data_not_detected() {
+        assert!(!is_svg_data(b"\x89PNG\r\n\x1a\n"));
+        assert!(!is_svg_data(b"\xff\xd8\xff"));
+        assert!(!is_svg_data(b"just some text"));
+        assert!(!is_svg_data(b"<html><body>not svg</body></html>"));
+        assert!(!is_svg_data(b""));
     }
 }
 

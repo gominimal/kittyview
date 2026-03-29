@@ -41,9 +41,15 @@ kittyview photo.jpg
 # Display an SVG diagram
 kittyview architecture.svg
 
+# Pipe from another tool
+curl -s https://example.com/image.png | kittyview
+dot -Tsvg graph.dot | kittyview
+
 # Display the built-in logo
 kittyview logo
 ```
+
+When no file is given and stdin is piped, kittyview reads from stdin automatically. Format is detected from file contents (magic bytes for raster images, `<svg` for SVGs).
 
 ### Convert to PNG
 
@@ -56,8 +62,8 @@ kittyview png diagram.svg -o diagram.png
 # Export the built-in logo
 kittyview png --logo -o logo.png
 
-# Pipe to another tool
-kittyview png chart.svg | feh -
+# Pipe through
+dot -Tsvg graph.dot | kittyview png -o graph.png
 ```
 
 ### Shell completions
@@ -106,15 +112,21 @@ When rendering SVGs, external file references (`<image href="...">`) are blocked
 
 Data URLs (images embedded directly in the SVG) always work regardless of policy.
 
+For file inputs, relative paths in the SVG resolve from the SVG file's directory. For stdin, they resolve from the current working directory.
+
 ```
 # Render an SVG that references local images
 kittyview --svg-resources tree diagram.svg
+
+# Same via stdin -- relative paths resolve from CWD
+cat diagram.svg | kittyview --svg-resources tree
 ```
 
 ## Security
 
 - **Terminal detection**: kittyview refuses to emit escape sequences to non-terminal stdout or unsupported terminals unless `--force` is used. This prevents accidental binary output to files or pipes.
-- **SVG sandboxing**: External file access from SVGs is blocked by default (`--svg-resources none`).
+- **Stdin support**: When no file is given and stdin is piped, kittyview reads from stdin. Format is detected from content, not filenames.
+- **SVG sandboxing**: External file access from SVGs is blocked by default (`--svg-resources none`). This applies to both file and stdin inputs.
 - **SVG size limits**: Oversized SVGs are automatically downscaled (max 8192x8192) to prevent memory exhaustion.
 - **Pure Rust**: No C dependencies. The entire dependency tree compiles from Rust source.
 - **Crash safety**: Kitty protocol output is fully buffered before writing to minimize partial escape sequences if the process is interrupted.
