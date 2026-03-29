@@ -67,7 +67,7 @@ kittyview png chart.svg | feh -
 kittyview completions bash > ~/.local/share/bash-completion/completions/kittyview
 
 # Zsh
-kittyview completions zsh > ~/.local/share/zsh/site-functions
+kittyview completions zsh > ~/.local/share/zsh/site-functions/_kittyview
 
 # Fish
 kittyview completions fish > ~/.config/fish/completions/kittyview.fish
