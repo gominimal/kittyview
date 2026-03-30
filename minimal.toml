@@ -7,12 +7,10 @@ locked_commit = "a5054f2fb5789e5d1a595332892bcb6bfac18e60"
 
 [harness]
 use = "rust"
-build_packages = ["llvm"]
 
 [defaults]
 state_key = "dev"
 
 [tasks.shell]
-interactive = true
-packages = ["base", "emacs", "emacs-config-dev1", "claude-code", "less", "mermaid-cli","gcc"]
+packages = ["base", "emacs", "emacs-config-dev1", "claude-code", "less", "mermaid-cli"]
 exec = "bash --noprofile -l"

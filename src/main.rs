@@ -28,6 +28,10 @@ struct Cli {
     #[arg(long, global = true)]
     force: bool,
 
+    /// Play animated images (e.g. GIF) instead of showing first frame
+    #[arg(long, global = true)]
+    animate: bool,
+
     /// SVG external resource access policy [default: none]
     #[arg(long, value_enum, global = true, default_value_t)]
     svg_resources: svg::SvgResources,
@@ -61,21 +65,31 @@ enum Commands {
 
 /// Detect whether file data looks like SVG (by extension or content sniffing).
 fn is_svg(path: &std::path::Path, data: &[u8]) -> bool {
-    // Check extension first
     if let Some(ext) = path.extension() {
         let ext = ext.to_string_lossy().to_ascii_lowercase();
         if ext == "svg" || ext == "svgz" {
             return true;
         }
     }
-    // Content sniff: look for XML/SVG markers in the first 1KB
+    is_svg_data(data)
+}
+
+/// Check whether raw data looks like SVG (content sniffing only, no extension).
+fn is_svg_data(data: &[u8]) -> bool {
     let head = &data[..data.len().min(1024)];
     let head_str = String::from_utf8_lossy(head);
     head_str.contains("<svg") || head_str.contains("<!DOCTYPE svg")
 }
 
-/// Load an image file and produce PNG bytes.
-/// Routes SVG files through resvg, everything else through the image crate.
+/// Encode a DynamicImage as PNG bytes.
+fn encode_png(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
+    let mut buf = Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode PNG: {e}"))?;
+    Ok(buf.into_inner())
+}
+
+/// Load an image file and produce PNG bytes (single frame).
 fn load_image_as_png(
     path: &std::path::Path,
     svg_resources: svg::SvgResources,
@@ -88,47 +102,112 @@ fn load_image_as_png(
 
     let img = image::load_from_memory(&data)
         .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
-    let mut buf = Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png)
-        .map_err(|e| format!("Failed to encode PNG: {e}"))?;
-    Ok(buf.into_inner())
+    encode_png(&img)
 }
 
-/// Check whether raw data looks like SVG (content sniffing only, no extension).
-fn is_svg_data(data: &[u8]) -> bool {
-    let head = &data[..data.len().min(1024)];
-    let head_str = String::from_utf8_lossy(head);
-    head_str.contains("<svg") || head_str.contains("<!DOCTYPE svg")
-}
-
-/// Read stdin and produce PNG bytes.
-/// Uses content sniffing for format detection since there is no filename.
-/// For SVGs, CWD is used as the base for resolving relative resource paths.
-fn load_stdin_as_png(svg_resources: svg::SvgResources) -> Result<Vec<u8>, String> {
+/// Read stdin bytes, returning an error if empty.
+fn read_stdin() -> Result<Vec<u8>, String> {
     let mut data = Vec::new();
     io::stdin()
         .lock()
         .read_to_end(&mut data)
         .map_err(|e| format!("Failed to read stdin: {e}"))?;
-
     if data.is_empty() {
         return Err("No data received on stdin".to_string());
     }
+    Ok(data)
+}
+
+/// Synthetic SVG path for stdin (CWD-based resource resolution).
+fn stdin_svg_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join("stdin.svg")
+}
+
+/// Read stdin and produce PNG bytes (single frame).
+fn load_stdin_as_png(svg_resources: svg::SvgResources) -> Result<Vec<u8>, String> {
+    let data = read_stdin()?;
 
     if is_svg_data(&data) {
-        // Use CWD as a synthetic path so resources_dir resolves relative refs from there
-        let cwd = std::env::current_dir()
-            .unwrap_or_default()
-            .join("stdin.svg");
-        return svg::render_svg_to_png(&data, &cwd, svg_resources);
+        let path = stdin_svg_path();
+        return svg::render_svg_to_png(&data, &path, svg_resources);
     }
 
     let img = image::load_from_memory(&data)
         .map_err(|e| format!("Failed to decode image from stdin: {e}"))?;
-    let mut buf = Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png)
-        .map_err(|e| format!("Failed to encode PNG: {e}"))?;
-    Ok(buf.into_inner())
+    encode_png(&img)
+}
+
+/// Decode GIF frames as (PNG bytes, delay_ms) pairs.
+fn decode_gif_frames(data: &[u8]) -> Result<Vec<(Vec<u8>, u32)>, String> {
+    use image::AnimationDecoder;
+    use image::codecs::gif::GifDecoder;
+
+    let decoder =
+        GifDecoder::new(Cursor::new(data)).map_err(|e| format!("Failed to decode GIF: {e}"))?;
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .map_err(|e| format!("Failed to read GIF frames: {e}"))?;
+
+    let mut result = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        let delay_ms = if denom == 0 { 100 } else { numer / denom };
+        let delay_ms = delay_ms.max(20); // floor at 20ms to prevent 0-delay spam
+
+        let img = image::DynamicImage::ImageRgba8(frame.into_buffer());
+        result.push((encode_png(&img)?, delay_ms));
+    }
+
+    Ok(result)
+}
+
+/// Load an image file as animation frames. Falls back to single frame for non-animated formats.
+fn load_animated_image(
+    path: &std::path::Path,
+    svg_resources: svg::SvgResources,
+) -> Result<Vec<(Vec<u8>, u32)>, String> {
+    let data = fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+
+    if is_svg(path, &data) {
+        let png = svg::render_svg_to_png(&data, path, svg_resources)?;
+        return Ok(vec![(png, 0)]);
+    }
+
+    if let Ok(image::ImageFormat::Gif) = image::guess_format(&data) {
+        let frames = decode_gif_frames(&data)?;
+        if frames.len() > 1 {
+            return Ok(frames);
+        }
+    }
+
+    let img = image::load_from_memory(&data)
+        .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
+    Ok(vec![(encode_png(&img)?, 0)])
+}
+
+/// Load stdin as animation frames.
+fn load_animated_stdin(svg_resources: svg::SvgResources) -> Result<Vec<(Vec<u8>, u32)>, String> {
+    let data = read_stdin()?;
+
+    if is_svg_data(&data) {
+        let path = stdin_svg_path();
+        let png = svg::render_svg_to_png(&data, &path, svg_resources)?;
+        return Ok(vec![(png, 0)]);
+    }
+
+    if let Ok(image::ImageFormat::Gif) = image::guess_format(&data) {
+        let frames = decode_gif_frames(&data)?;
+        if frames.len() > 1 {
+            return Ok(frames);
+        }
+    }
+
+    let img = image::load_from_memory(&data)
+        .map_err(|e| format!("Failed to decode image from stdin: {e}"))?;
+    Ok(vec![(encode_png(&img)?, 0)])
 }
 
 /// Write bytes to a file or stdout.
@@ -147,7 +226,6 @@ fn check_terminal(force: bool) -> Result<(), String> {
     if force {
         return Ok(());
     }
-
     if !io::stdout().is_terminal() {
         return Err(
             "stdout is not a terminal (use --force to emit escape sequences anyway, \
@@ -155,7 +233,6 @@ fn check_terminal(force: bool) -> Result<(), String> {
                 .to_string(),
         );
     }
-
     if !kitty::is_supported() {
         return Err(
             "Terminal does not appear to support kitty graphics protocol \
@@ -163,8 +240,18 @@ fn check_terminal(force: bool) -> Result<(), String> {
                 .to_string(),
         );
     }
-
     Ok(())
+}
+
+/// Display frames to stdout -- animation if multi-frame, static if single.
+fn display_frames(frames: &[(Vec<u8>, u32)], out: &mut impl Write) -> Result<(), String> {
+    if frames.len() > 1 {
+        kitty::display_animation(frames, out).map_err(|e| format!("Failed to write: {e}"))
+    } else if let Some((png, _)) = frames.first() {
+        kitty::display_png(png, out).map_err(|e| format!("Failed to write: {e}"))
+    } else {
+        Ok(())
+    }
 }
 
 fn run() -> Result<(), String> {
@@ -173,9 +260,15 @@ fn run() -> Result<(), String> {
     match cli.command {
         Some(Commands::Logo) => {
             check_terminal(cli.force)?;
-            let png = logo::generate_logo_png();
             let mut stdout = io::stdout().lock();
-            kitty::display_png(&png, &mut stdout).map_err(|e| format!("Failed to write: {e}"))?;
+            if cli.animate {
+                let frames = logo::generate_animated_logo();
+                display_frames(&frames, &mut stdout)?;
+            } else {
+                let png = logo::generate_logo_png();
+                kitty::display_png(&png, &mut stdout)
+                    .map_err(|e| format!("Failed to write: {e}"))?;
+            }
             writeln!(stdout).map_err(|e| format!("Failed to write: {e}"))?;
             Ok(())
         }
@@ -202,16 +295,30 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         None => {
-            let png = match cli.file {
-                Some(path) => load_image_as_png(&path, cli.svg_resources)?,
-                None if !io::stdin().is_terminal() => load_stdin_as_png(cli.svg_resources)?,
-                None => {
-                    return Err("No image file specified. Use --help for usage.".to_string());
-                }
-            };
             check_terminal(cli.force)?;
             let mut stdout = io::stdout().lock();
-            kitty::display_png(&png, &mut stdout).map_err(|e| format!("Failed to write: {e}"))?;
+
+            if cli.animate {
+                let frames = match cli.file {
+                    Some(path) => load_animated_image(&path, cli.svg_resources)?,
+                    None if !io::stdin().is_terminal() => load_animated_stdin(cli.svg_resources)?,
+                    None => {
+                        return Err("No image file specified. Use --help for usage.".to_string());
+                    }
+                };
+                display_frames(&frames, &mut stdout)?;
+            } else {
+                let png = match cli.file {
+                    Some(path) => load_image_as_png(&path, cli.svg_resources)?,
+                    None if !io::stdin().is_terminal() => load_stdin_as_png(cli.svg_resources)?,
+                    None => {
+                        return Err("No image file specified. Use --help for usage.".to_string());
+                    }
+                };
+                kitty::display_png(&png, &mut stdout)
+                    .map_err(|e| format!("Failed to write: {e}"))?;
+            }
+
             writeln!(stdout).map_err(|e| format!("Failed to write: {e}"))?;
             Ok(())
         }
@@ -245,8 +352,6 @@ mod tests {
         assert!(!is_svg(Path::new("image.jpg"), b"\xff\xd8\xff"));
         assert!(!is_svg(Path::new("file.txt"), b"just some text"));
     }
-
-    // --- is_svg_data (content-only sniffing for stdin) ---
 
     #[test]
     fn svg_data_detected_by_content() {

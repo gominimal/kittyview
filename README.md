@@ -51,6 +51,20 @@ kittyview logo
 
 When no file is given and stdin is piped, kittyview reads from stdin automatically. Format is detected from file contents (magic bytes for raster images, `<svg` for SVGs).
 
+### Animated images
+
+By default, animated GIFs display their first frame only. Use `--animate` to play the full animation via the kitty animation protocol:
+
+```
+# Play an animated GIF
+kittyview --animate nyan.gif
+
+# Animated logo with speech bubble
+kittyview --animate logo
+```
+
+Animation support requires a terminal with kitty animation protocol support (currently kitty; Ghostty and others may show only the first frame).
+
 ### Convert to PNG
 
 The `png` subcommand exports any supported format as a PNG file, useful for debugging or format conversion:
