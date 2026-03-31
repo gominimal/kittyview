@@ -352,6 +352,7 @@ dependencies = [
  "clap_complete",
  "image",
  "resvg",
+ "roxmltree 0.21.1",
 ]
 
 [[package]]

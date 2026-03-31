@@ -30,3 +30,4 @@ resvg = "0.47"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 base64 = "0.22"
+roxmltree = "0.21"
