@@ -100,7 +100,7 @@ kittyview completions fish > ~/.config/fish/completions/kittyview.fish
 | PNG      | `.png`                                     |
 | JPEG     | `.jpg`, `.jpeg`                            |
 | GIF      | `.gif`                                     |
-| SVG      | `.svg`, `.svgz` (with full text rendering) |
+| SVG      | `.svg`, `.svgz` (text rendering, see [SVG notes](#svg-text-rendering)) |
 | WebP     | `.webp`                                    |
 | BMP      | `.bmp`                                     |
 | TIFF     | `.tif`, `.tiff`                            |
@@ -112,6 +112,19 @@ kittyview completions fish > ~/.config/fish/completions/kittyview.fish
 | HDR      | `.hdr`                                     |
 
 SVG files are detected by extension or by content sniffing (`<svg` in the first 1KB).
+
+## SVG text rendering
+
+kittyview renders SVGs using [resvg](https://github.com/linebender/resvg), which supports native SVG `<text>` elements out of the box.
+
+Many tools (mermaid-cli, draw.io, D3.js) generate SVGs that use `<foreignObject>` with embedded HTML for text labels instead of native `<text>` elements. kittyview detects these and converts them to `<text>` on a best-effort basis. This covers the common cases well, but has some limitations:
+
+- **Text wrapping**: HTML text that relies on CSS word-wrap (without explicit `<br>` tags) will render as a single line. Most mermaid diagrams use `<br>` and are unaffected.
+- **Rich formatting**: Bold, italic, and per-element font size or color differences inside labels are not preserved. The global font and color from the SVG's stylesheet are used.
+- **Structural HTML**: Tables, lists, and nested divs are rendered as readable plain text (cells separated by tabs, rows and list items on separate lines) but without visual table/list formatting. MathML and form elements are not supported.
+- **Edge label backgrounds**: Semi-transparent background rectangles behind edge labels are not reproduced.
+
+SVGs that already use native `<text>` elements (e.g. Inkscape, some mermaid-cli configurations) render without these limitations.
 
 ## SVG resource access
 
@@ -147,7 +160,7 @@ cat diagram.svg | kittyview --svg-resources tree
 
 ## Building from source
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.87+ (edition 2024).
 
 ```
 cargo build --release

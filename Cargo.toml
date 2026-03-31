@@ -2,7 +2,7 @@
 name = "kittyview"
 version = "0.1.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "Apache-2.0"
 description = "Display images in kitty-compatible terminals"
 repository = "https://github.com/gominimal/kittyview"
@@ -30,3 +30,4 @@ resvg = "0.47"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 base64 = "0.22"
+roxmltree = "0.21"
