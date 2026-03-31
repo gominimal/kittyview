@@ -160,7 +160,7 @@ cat diagram.svg | kittyview --svg-resources tree
 
 ## Building from source
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.87+ (edition 2024).
 
 ```
 cargo build --release
