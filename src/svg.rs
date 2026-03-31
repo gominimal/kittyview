@@ -116,8 +116,8 @@ fn strip_tags(s: &str) -> String {
                     "br" => out.push('\n'),
                     _ if is_closing => match tag_name {
                         // Block-level / row boundaries → newline
-                        "tr" | "p" | "div" | "li" | "dt" | "dd" | "h1" | "h2" | "h3"
-                        | "h4" | "h5" | "h6" | "blockquote" | "pre" => out.push('\n'),
+                        "tr" | "p" | "div" | "li" | "dt" | "dd" | "h1" | "h2" | "h3" | "h4"
+                        | "h5" | "h6" | "blockquote" | "pre" => out.push('\n'),
                         // Cell boundaries → tab
                         "td" | "th" => out.push('\t'),
                         _ => {}
@@ -270,9 +270,7 @@ pub fn convert_foreign_objects(svg_data: &[u8]) -> Vec<u8> {
         // Well-formed SVGs use <switch> with foreignObject + fallback <text>.
         if let Some(parent) = node.parent() {
             if parent.tag_name().name() == "switch"
-                && parent
-                    .children()
-                    .any(|c| c.tag_name().name() == "text")
+                && parent.children().any(|c| c.tag_name().name() == "text")
             {
                 continue;
             }
@@ -477,7 +475,7 @@ fn parse_css_property(css: &str, property: &str) -> Option<String> {
     let rest = &css[idx + property.len()..];
     let rest = rest.trim_start().strip_prefix(':')?;
     let rest = rest.trim_start();
-    let end = rest.find(|c: char| c == ';' || c == '}').unwrap_or(rest.len());
+    let end = rest.find([';', '}']).unwrap_or(rest.len());
     let value = rest[..end].trim();
     if value.is_empty() {
         None
@@ -727,7 +725,8 @@ mod tests {
 
     #[test]
     fn extract_text_with_entities() {
-        let html = r#"<foreignObject width="100" height="24"><div><p>A &amp; B</p></div></foreignObject>"#;
+        let html =
+            r#"<foreignObject width="100" height="24"><div><p>A &amp; B</p></div></foreignObject>"#;
         let lines = extract_text_lines(html);
         assert_eq!(lines, vec!["A & B"]);
     }
@@ -772,10 +771,7 @@ mod tests {
             !result_str.contains("foreignObject"),
             "foreignObject should be replaced"
         );
-        assert!(
-            result_str.contains("<text"),
-            "should contain text element"
-        );
+        assert!(result_str.contains("<text"), "should contain text element");
         assert!(
             result_str.contains("Test Label"),
             "text content should be preserved"
@@ -817,15 +813,21 @@ mod tests {
             r##"</div></foreignObject></g></svg>"##,
         );
 
-        let png =
-            render_svg_to_png(svg.as_bytes(), Path::new("/tmp/test.svg"), SvgResources::None)
-                .unwrap();
+        let png = render_svg_to_png(
+            svg.as_bytes(),
+            Path::new("/tmp/test.svg"),
+            SvgResources::None,
+        )
+        .unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
 
         // Verify the rendered image has non-trivial content (not all transparent/white)
         let img = image::load_from_memory(&png).unwrap().to_rgba8();
         let has_text_pixels = img.pixels().any(|p| p.0[0] < 100 && p.0[3] > 200);
-        assert!(has_text_pixels, "rendered image should contain dark pixels from text");
+        assert!(
+            has_text_pixels,
+            "rendered image should contain dark pixels from text"
+        );
     }
 
     #[test]
@@ -895,7 +897,10 @@ mod tests {
         );
         let result = convert_foreign_objects(svg.as_bytes());
         let result_str = std::str::from_utf8(&result).unwrap();
-        assert!(result_str.contains(r##"fill="#333""##), "should have fill: {result_str}");
+        assert!(
+            result_str.contains(r##"fill="#333""##),
+            "should have fill: {result_str}"
+        );
         assert!(
             result_str.contains("font-family"),
             "should have font-family: {result_str}"
