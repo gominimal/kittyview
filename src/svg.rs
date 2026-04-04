@@ -21,11 +21,7 @@ fn has_font_family(db: &fontdb::Database, name: &str) -> bool {
 
 /// Set a generic font family mapping to the first available font in the list.
 /// If none are found, the mapping is left at fontdb's default.
-fn set_family_if_available(
-    db: &mut fontdb::Database,
-    generic: GenericFamily,
-    candidates: &[&str],
-) {
+fn set_family_if_available(db: &mut fontdb::Database, generic: GenericFamily, candidates: &[&str]) {
     for &name in candidates {
         if has_font_family(db, name) {
             match generic {
@@ -183,9 +179,7 @@ fn strip_tags(s: &str) -> String {
                     .split_whitespace()
                     .next()
                     .unwrap_or("");
-                let tag_name = tag_name_raw
-                    .strip_suffix('/')
-                    .unwrap_or(tag_name_raw);
+                let tag_name = tag_name_raw.strip_suffix('/').unwrap_or(tag_name_raw);
                 let is_closing = tag.starts_with('/');
                 match tag_name {
                     // <br> / <br/> — always a newline (void element, never has a closing tag)
@@ -670,11 +664,10 @@ mod tests {
 
     #[test]
     fn oversized_svg_is_downscaled() {
-        let svg = format!(
-            "<svg xmlns='http://www.w3.org/2000/svg' width='20000' height='10000'>\
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='20000' height='10000'>\
                 <rect width='20000' height='10000' fill='blue'/>\
             </svg>"
-        );
+            .to_string();
         let png = render_svg_to_png(
             svg.as_bytes(),
             Path::new("/tmp/test.svg"),
@@ -759,7 +752,7 @@ mod tests {
         if !outside
             .canonicalize()
             .unwrap()
-            .starts_with(&cwd.canonicalize().unwrap())
+            .starts_with(cwd.canonicalize().unwrap())
         {
             assert!(!is_path_allowed(&outside, SvgResources::Tree));
         }

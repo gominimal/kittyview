@@ -235,9 +235,12 @@ mod tests {
         let img = image::load_from_memory(&frames[0].0).unwrap().to_rgba8();
         // The speech bubble text ("kittyview") is dark purple (#2D1B69).
         // Check for dark pixels in the right half of the image (where the bubble is).
-        let dark_in_bubble = img.enumerate_pixels().filter(|(x, _, p)| {
-            *x > 150 && p.0[0] < 80 && p.0[1] < 80 && p.0[2] < 120 && p.0[3] > 200
-        }).count();
+        let dark_in_bubble = img
+            .enumerate_pixels()
+            .filter(|(x, _, p)| {
+                *x > 150 && p.0[0] < 80 && p.0[1] < 80 && p.0[2] < 120 && p.0[3] > 200
+            })
+            .count();
         assert!(
             dark_in_bubble > 50,
             "speech bubble should contain visible text pixels (got {dark_in_bubble})"

@@ -235,7 +235,11 @@ fn extract_version_parens(name: &str) -> Option<String> {
 fn extract_version_space(name: &str) -> Option<String> {
     let pos = name.find(' ')?;
     let ver = name[pos + 1..].trim();
-    if ver.is_empty() { None } else { Some(ver.to_string()) }
+    if ver.is_empty() {
+        None
+    } else {
+        Some(ver.to_string())
+    }
 }
 
 /// Find the String Terminator (ST) starting from `from`.
@@ -295,7 +299,12 @@ trait TerminalQuerier {
 
 /// Identify what's at the current layer: send XTVERSION, fall back to DA2.
 /// Returns (terminal, optional mux detected at this layer).
-fn identify_layer(q: &mut impl TerminalQuerier, query_bytes: &[u8], da2_bytes: &[u8], timeout: Duration) -> Option<(Terminal, Option<Mux>)> {
+fn identify_layer(
+    q: &mut impl TerminalQuerier,
+    query_bytes: &[u8],
+    da2_bytes: &[u8],
+    timeout: Duration,
+) -> Option<(Terminal, Option<Mux>)> {
     // Try XTVERSION
     if let Some(resp) = q.query(query_bytes, timeout) {
         if let Some(result) = parse_xtversion(&resp) {
@@ -385,7 +394,10 @@ fn probe_outer(q: &mut impl TerminalQuerier, stack: &mut Vec<Mux>, timeout: Dura
 pub fn detect_from_env() -> TerminalInfo {
     let mux_stack = detect_mux_env();
     let terminal = detect_terminal_env();
-    TerminalInfo { mux_stack, terminal }
+    TerminalInfo {
+        mux_stack,
+        terminal,
+    }
 }
 
 fn detect_mux_env() -> Vec<Mux> {
@@ -510,8 +522,7 @@ mod tty {
                 if !poll_fd(self.read_fd, Duration::ZERO).unwrap_or(false) {
                     break;
                 }
-                let ret =
-                    unsafe { libc::read(self.read_fd, byte.as_mut_ptr().cast(), 1) };
+                let ret = unsafe { libc::read(self.read_fd, byte.as_mut_ptr().cast(), 1) };
                 if ret <= 0 {
                     break;
                 }
@@ -532,8 +543,7 @@ mod tty {
                     break;
                 }
                 let mut byte = [0u8];
-                let ret =
-                    unsafe { libc::read(self.read_fd, byte.as_mut_ptr().cast(), 1) };
+                let ret = unsafe { libc::read(self.read_fd, byte.as_mut_ptr().cast(), 1) };
                 if ret <= 0 {
                     break;
                 }
@@ -550,9 +560,7 @@ mod tty {
     impl TerminalQuerier for QuerySession {
         fn query(&mut self, request: &[u8], timeout: Duration) -> Option<Vec<u8>> {
             self.drain();
-            let ret = unsafe {
-                libc::write(self.write_fd, request.as_ptr().cast(), request.len())
-            };
+            let ret = unsafe { libc::write(self.write_fd, request.as_ptr().cast(), request.len()) };
             if ret < 0 {
                 return None;
             }
@@ -941,10 +949,7 @@ mod tests {
         // wraps through full stack and gets kitty.
         let xt_through_tmux = wrap_for_stack(XTVERSION, &[Mux::Tmux(None)]);
         let mut q = MockQuerier::new(vec![
-            (
-                XTVERSION.to_vec(),
-                Some(b"\x1bP>|tmux 3.3a\x1b\\".to_vec()),
-            ),
+            (XTVERSION.to_vec(), Some(b"\x1bP>|tmux 3.3a\x1b\\".to_vec())),
             // probe_outer: XTVERSION through 1 tmux -> kitty (terminal, not mux)
             (
                 xt_through_tmux.clone(),
@@ -968,25 +973,13 @@ mod tests {
         let xt_2 = wrap_for_stack(XTVERSION, &[Mux::Tmux(None), Mux::Tmux(None)]);
         let mut q = MockQuerier::new(vec![
             // Layer 0: XTVERSION -> tmux
-            (
-                XTVERSION.to_vec(),
-                Some(b"\x1bP>|tmux 3.4\x1b\\".to_vec()),
-            ),
+            (XTVERSION.to_vec(), Some(b"\x1bP>|tmux 3.4\x1b\\".to_vec())),
             // probe_outer through 1 tmux -> another tmux
-            (
-                xt_1.clone(),
-                Some(b"\x1bP>|tmux 3.3a\x1b\\".to_vec()),
-            ),
+            (xt_1.clone(), Some(b"\x1bP>|tmux 3.3a\x1b\\".to_vec())),
             // probe_outer through 2 tmux -> kitty (terminal)
-            (
-                xt_2.clone(),
-                Some(b"\x1bP>|kitty(0.35.0)\x1b\\".to_vec()),
-            ),
+            (xt_2.clone(), Some(b"\x1bP>|kitty(0.35.0)\x1b\\".to_vec())),
             // detect_inband final query through full stack -> kitty
-            (
-                xt_2,
-                Some(b"\x1bP>|kitty(0.35.0)\x1b\\".to_vec()),
-            ),
+            (xt_2, Some(b"\x1bP>|kitty(0.35.0)\x1b\\".to_vec())),
         ]);
         let info = detect_inband(&mut q);
         assert_eq!(info.mux_stack.len(), 2);
@@ -1003,26 +996,17 @@ mod tests {
 
         let mut q = MockQuerier::new(vec![
             // XTVERSION -> tmux (innermost)
-            (
-                XTVERSION.to_vec(),
-                Some(b"\x1bP>|tmux 3.4\x1b\\".to_vec()),
-            ),
+            (XTVERSION.to_vec(), Some(b"\x1bP>|tmux 3.4\x1b\\".to_vec())),
             // Through tmux: XTVERSION times out, DA2 -> screen
             (xt_tmux.clone(), None),
-            (
-                da_tmux.clone(),
-                Some(b"\x1b[>83;40801;0c".to_vec()),
-            ),
+            (da_tmux.clone(), Some(b"\x1b[>83;40801;0c".to_vec())),
             // Through tmux+screen: XTVERSION -> Ghostty
             (
                 xt_both.clone(),
                 Some(b"\x1bP>|Ghostty(1.0.0)\x1b\\".to_vec()),
             ),
             // Final query through stack -> Ghostty
-            (
-                xt_both,
-                Some(b"\x1bP>|Ghostty(1.0.0)\x1b\\".to_vec()),
-            ),
+            (xt_both, Some(b"\x1bP>|Ghostty(1.0.0)\x1b\\".to_vec())),
         ]);
         let info = detect_inband(&mut q);
         assert_eq!(info.mux_stack.len(), 2);
@@ -1044,10 +1028,7 @@ mod tests {
                 Some(b"\x1bP>|kitty(0.30.0)\x1b\\".to_vec()),
             ),
             // Final query
-            (
-                xt_screen,
-                Some(b"\x1bP>|kitty(0.30.0)\x1b\\".to_vec()),
-            ),
+            (xt_screen, Some(b"\x1bP>|kitty(0.30.0)\x1b\\".to_vec())),
         ]);
         let info = detect_inband(&mut q);
         assert_eq!(info.mux_stack.len(), 1);
@@ -1068,10 +1049,7 @@ mod tests {
 
     #[test]
     fn detect_both_timeout_returns_unknown() {
-        let mut q = MockQuerier::new(vec![
-            (XTVERSION.to_vec(), None),
-            (DA2.to_vec(), None),
-        ]);
+        let mut q = MockQuerier::new(vec![(XTVERSION.to_vec(), None), (DA2.to_vec(), None)]);
         let info = detect_inband(&mut q);
         assert_eq!(info.terminal, Terminal::Unknown);
         assert!(info.mux_stack.is_empty());
@@ -1082,10 +1060,7 @@ mod tests {
         let xt_tmux = wrap_for_stack(XTVERSION, &[Mux::Tmux(None)]);
         let da_tmux = wrap_for_stack(DA2, &[Mux::Tmux(None)]);
         let mut q = MockQuerier::new(vec![
-            (
-                XTVERSION.to_vec(),
-                Some(b"\x1bP>|tmux 3.4\x1b\\".to_vec()),
-            ),
+            (XTVERSION.to_vec(), Some(b"\x1bP>|tmux 3.4\x1b\\".to_vec())),
             // probe_outer and final query all time out
             (xt_tmux, None),
             (da_tmux, None),

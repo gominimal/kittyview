@@ -264,10 +264,7 @@ fn write_output(data: &[u8], path: Option<&std::path::Path>) -> Result<(), Strin
 ///
 /// Returns the detected mux stack (for passthrough wrapping) or an error if the
 /// terminal doesn't support kitty graphics and `--force` is not set.
-fn check_terminal(
-    force: bool,
-    passthrough: &str,
-) -> Result<Vec<Mux>, String> {
+fn check_terminal(force: bool, passthrough: &str) -> Result<Vec<Mux>, String> {
     if !force && !io::stdout().is_terminal() {
         return Err(
             "stdout is not a terminal (use --force to emit escape sequences anyway, \
@@ -408,6 +405,16 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,15 +457,5 @@ mod tests {
         assert!(!is_svg_data(b"just some text"));
         assert!(!is_svg_data(b"<html><body>not svg</body></html>"));
         assert!(!is_svg_data(b""));
-    }
-}
-
-fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(msg) => {
-            eprintln!("Error: {msg}");
-            ExitCode::FAILURE
-        }
     }
 }

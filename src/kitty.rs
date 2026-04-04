@@ -56,11 +56,7 @@ fn write_frame_data(
 }
 
 /// Display a single PNG image via the kitty graphics protocol.
-pub fn display_png(
-    png_data: &[u8],
-    out: &mut impl Write,
-    mux_stack: &[Mux],
-) -> io::Result<()> {
+pub fn display_png(png_data: &[u8], out: &mut impl Write, mux_stack: &[Mux]) -> io::Result<()> {
     let mut buf = Vec::with_capacity(png_data.len() * 2);
     write_frame_data(&mut buf, png_data, "a=T,f=100", mux_stack)?;
     out.write_all(&buf)?;
@@ -85,7 +81,12 @@ pub fn display_animation(
     const ID: u32 = 1;
 
     // Base frame (frame 1)
-    write_frame_data(&mut buf, &frames[0].0, &format!("a=T,f=100,i={ID},q=2"), mux_stack)?;
+    write_frame_data(
+        &mut buf,
+        &frames[0].0,
+        &format!("a=T,f=100,i={ID},q=2"),
+        mux_stack,
+    )?;
 
     // Additional frames
     for (i, (png_data, delay_ms)) in frames.iter().enumerate().skip(1) {
@@ -225,10 +226,7 @@ mod tests {
 
     #[test]
     fn tmux_animation_start_wrapped() {
-        let frames = vec![
-            (b"f1".to_vec(), 100u32),
-            (b"f2".to_vec(), 150),
-        ];
+        let frames = vec![(b"f1".to_vec(), 100u32), (b"f2".to_vec(), 150)];
         let mut out = Vec::new();
         let stack = [Mux::Tmux(None)];
         display_animation(&frames, &mut out, &stack).unwrap();
