@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use resvg::usvg;
+use resvg::usvg::fontdb;
 use std::path::Path;
 
 /// Default font size used by mermaid-generated SVGs.
@@ -11,6 +12,74 @@ const LINE_HEIGHT: f64 = 1.5;
 /// Maximum dimension (width or height) for the rendered pixmap.
 /// 8192x8192 * 4 bytes = 256MB, which is a reasonable upper bound.
 const MAX_DIMENSION: u32 = 8192;
+
+/// Check if a font family name exists in the font database.
+fn has_font_family(db: &fontdb::Database, name: &str) -> bool {
+    db.faces()
+        .any(|face| face.families.iter().any(|(f, _)| f == name))
+}
+
+/// Set a generic font family mapping to the first available font in the list.
+/// If none are found, the mapping is left at fontdb's default.
+fn set_family_if_available(db: &mut fontdb::Database, generic: GenericFamily, candidates: &[&str]) {
+    for &name in candidates {
+        if has_font_family(db, name) {
+            match generic {
+                GenericFamily::SansSerif => db.set_sans_serif_family(name),
+                GenericFamily::Serif => db.set_serif_family(name),
+                GenericFamily::Monospace => db.set_monospace_family(name),
+            }
+            return;
+        }
+    }
+}
+
+enum GenericFamily {
+    SansSerif,
+    Serif,
+    Monospace,
+}
+
+/// Load system fonts and configure generic family mappings with fallbacks.
+///
+/// Tries common font families in order, falling back gracefully when
+/// specific fonts (e.g. Liberation Sans) aren't installed.
+pub fn configure_fonts(opts: &mut usvg::Options) {
+    opts.fontdb_mut().load_system_fonts();
+    set_family_if_available(
+        opts.fontdb_mut(),
+        GenericFamily::SansSerif,
+        &[
+            "Liberation Sans",
+            "DejaVu Sans",
+            "Helvetica Neue",
+            "Helvetica",
+            "Arial",
+        ],
+    );
+    set_family_if_available(
+        opts.fontdb_mut(),
+        GenericFamily::Serif,
+        &[
+            "Liberation Serif",
+            "DejaVu Serif",
+            "Georgia",
+            "Times New Roman",
+            "Times",
+        ],
+    );
+    set_family_if_available(
+        opts.fontdb_mut(),
+        GenericFamily::Monospace,
+        &[
+            "Liberation Mono",
+            "DejaVu Sans Mono",
+            "Menlo",
+            "Consolas",
+            "Courier New",
+        ],
+    );
+}
 
 /// Controls whether SVGs can load external files via `<image href="...">`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, clap::ValueEnum)]
@@ -104,12 +173,13 @@ fn strip_tags(s: &str) -> String {
                 inside_tag = false;
                 // Inject separators based on the closing tag name.
                 let tag = tag_buf.trim().to_ascii_lowercase();
-                let tag_name = tag
+                let tag_name_raw = tag
                     .strip_prefix('/')
                     .unwrap_or(&tag)
                     .split_whitespace()
                     .next()
                     .unwrap_or("");
+                let tag_name = tag_name_raw.strip_suffix('/').unwrap_or(tag_name_raw);
                 let is_closing = tag.starts_with('/');
                 match tag_name {
                     // <br> / <br/> — always a newline (void element, never has a closing tag)
@@ -527,10 +597,7 @@ pub fn render_svg_to_png(
         resolve_string: make_string_resolver(policy),
     };
 
-    opt.fontdb_mut().load_system_fonts();
-    opt.fontdb_mut().set_sans_serif_family("Liberation Sans");
-    opt.fontdb_mut().set_serif_family("Liberation Serif");
-    opt.fontdb_mut().set_monospace_family("Liberation Mono");
+    configure_fonts(&mut opt);
 
     let tree =
         usvg::Tree::from_data(&svg_data, &opt).map_err(|e| format!("Failed to parse SVG: {e}"))?;
@@ -597,11 +664,10 @@ mod tests {
 
     #[test]
     fn oversized_svg_is_downscaled() {
-        let svg = format!(
-            "<svg xmlns='http://www.w3.org/2000/svg' width='20000' height='10000'>\
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='20000' height='10000'>\
                 <rect width='20000' height='10000' fill='blue'/>\
             </svg>"
-        );
+            .to_string();
         let png = render_svg_to_png(
             svg.as_bytes(),
             Path::new("/tmp/test.svg"),
@@ -686,7 +752,7 @@ mod tests {
         if !outside
             .canonicalize()
             .unwrap()
-            .starts_with(&cwd.canonicalize().unwrap())
+            .starts_with(cwd.canonicalize().unwrap())
         {
             assert!(!is_path_allowed(&outside, SvgResources::Tree));
         }
@@ -721,6 +787,14 @@ mod tests {
         let html = r#"<foreignObject width="100" height="48"><div xmlns="http://www.w3.org/1999/xhtml"><span class="nodeLabel"><p>forge-api<br />(gRPC gateway)</p></span></div></foreignObject>"#;
         let lines = extract_text_lines(html);
         assert_eq!(lines, vec!["forge-api", "(gRPC gateway)"]);
+    }
+
+    #[test]
+    fn extract_text_br_self_closing_no_space() {
+        // <br/> without space before / — common in mermaid output
+        let html = r#"<foreignObject width="100" height="48"><div><p>line1<br/>line2</p></div></foreignObject>"#;
+        let lines = extract_text_lines(html);
+        assert_eq!(lines, vec!["line1", "line2"]);
     }
 
     #[test]

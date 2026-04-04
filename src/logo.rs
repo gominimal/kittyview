@@ -102,10 +102,7 @@ pub fn generate_animated_logo() -> Vec<(Vec<u8>, u32)> {
 
     // Load fonts once for all frames
     let mut opt = resvg::usvg::Options::default();
-    opt.fontdb_mut().load_system_fonts();
-    opt.fontdb_mut().set_sans_serif_family("Liberation Sans");
-    opt.fontdb_mut().set_serif_family("Liberation Serif");
-    opt.fontdb_mut().set_monospace_family("Liberation Mono");
+    crate::svg::configure_fonts(&mut opt);
 
     // (kitten_b64, y_offset, delay_ms)
     let frame_specs: [(&str, u32, u32); 4] = [
@@ -230,5 +227,23 @@ mod tests {
         let img = image::load_from_memory(&frames[0].0).unwrap();
         assert_eq!(img.width(), 480);
         assert_eq!(img.height(), 150);
+    }
+
+    #[test]
+    fn animated_logo_has_text_pixels() {
+        let frames = generate_animated_logo();
+        let img = image::load_from_memory(&frames[0].0).unwrap().to_rgba8();
+        // The speech bubble text ("kittyview") is dark purple (#2D1B69).
+        // Check for dark pixels in the right half of the image (where the bubble is).
+        let dark_in_bubble = img
+            .enumerate_pixels()
+            .filter(|(x, _, p)| {
+                *x > 150 && p.0[0] < 80 && p.0[1] < 80 && p.0[2] < 120 && p.0[3] > 200
+            })
+            .count();
+        assert!(
+            dark_in_bubble > 50,
+            "speech bubble should contain visible text pixels (got {dark_in_bubble})"
+        );
     }
 }
