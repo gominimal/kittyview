@@ -1,50 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::terminal::{Mux, wrap_for_stack};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::io::{self, Write};
 
 /// Maximum bytes of base64 data per chunk (kitty protocol limit).
 const CHUNK_SIZE: usize = 4096;
 
-/// Check whether the terminal likely supports the kitty graphics protocol,
-/// based on environment variables set by known-compatible terminals.
-pub fn is_supported() -> bool {
-    if std::env::var_os("KITTY_WINDOW_ID").is_some() {
-        return true;
+/// Write a single APC sequence to the output buffer, wrapped for the mux stack.
+fn write_apc(buf: &mut Vec<u8>, apc: &[u8], mux_stack: &[Mux]) {
+    if mux_stack.is_empty() || mux_stack.iter().all(|m| matches!(m, Mux::Zellij)) {
+        buf.extend_from_slice(apc);
+    } else {
+        buf.extend_from_slice(&wrap_for_stack(apc, mux_stack));
     }
-    if std::env::var_os("KONSOLE_VERSION").is_some() {
-        return true;
-    }
-    if let Some(prog) = std::env::var_os("TERM_PROGRAM") {
-        let prog = prog.to_string_lossy();
-        if matches!(
-            prog.as_ref(),
-            "kitty" | "WezTerm" | "ghostty" | "Ghostty" | "iTerm.app" | "iTerm2"
-        ) {
-            return true;
-        }
-    }
-    if let Some(term) = std::env::var_os("TERM") {
-        let term = term.to_string_lossy();
-        let term = term.to_ascii_lowercase();
-        if ["kitty", "ghostty", "wezterm"]
-            .iter()
-            .any(|t| term.contains(t))
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// Write a single image's base64-encoded data with the given header parameters.
-/// Handles chunking transparently.
-fn write_frame_data(buf: &mut Vec<u8>, png_data: &[u8], header: &str) -> io::Result<()> {
+/// Handles chunking transparently. Each APC chunk is individually wrapped for
+/// the multiplexer stack.
+fn write_frame_data(
+    buf: &mut Vec<u8>,
+    png_data: &[u8],
+    header: &str,
+    mux_stack: &[Mux],
+) -> io::Result<()> {
     let encoded = STANDARD.encode(png_data);
     let bytes = encoded.as_bytes();
 
     if bytes.len() <= CHUNK_SIZE {
-        write!(buf, "\x1b_G{header};{encoded}\x1b\\")?;
+        let mut apc = Vec::new();
+        write!(apc, "\x1b_G{header};{encoded}\x1b\\")?;
+        write_apc(buf, &apc, mux_stack);
     } else {
         let mut offset = 0;
         let mut first = true;
@@ -54,12 +41,14 @@ fn write_frame_data(buf: &mut Vec<u8>, png_data: &[u8], header: &str) -> io::Res
             let chunk = &encoded[offset..end];
             let is_last = end == bytes.len();
 
+            let mut apc = Vec::new();
             if first {
-                write!(buf, "\x1b_G{header},m={};{chunk}\x1b\\", u8::from(!is_last))?;
+                write!(apc, "\x1b_G{header},m={};{chunk}\x1b\\", u8::from(!is_last))?;
                 first = false;
             } else {
-                write!(buf, "\x1b_Gm={};{chunk}\x1b\\", u8::from(!is_last))?;
+                write!(apc, "\x1b_Gm={};{chunk}\x1b\\", u8::from(!is_last))?;
             }
+            write_apc(buf, &apc, mux_stack);
             offset = end;
         }
     }
@@ -67,28 +56,36 @@ fn write_frame_data(buf: &mut Vec<u8>, png_data: &[u8], header: &str) -> io::Res
 }
 
 /// Display a single PNG image via the kitty graphics protocol.
-pub fn display_png(png_data: &[u8], out: &mut impl Write) -> io::Result<()> {
+pub fn display_png(
+    png_data: &[u8],
+    out: &mut impl Write,
+    mux_stack: &[Mux],
+) -> io::Result<()> {
     let mut buf = Vec::with_capacity(png_data.len() * 2);
-    write_frame_data(&mut buf, png_data, "a=T,f=100")?;
+    write_frame_data(&mut buf, png_data, "a=T,f=100", mux_stack)?;
     out.write_all(&buf)?;
     out.flush()
 }
 
 /// Display an animated image via the kitty graphics protocol.
 /// Each frame is a `(png_bytes, delay_ms)` pair.
-pub fn display_animation(frames: &[(Vec<u8>, u32)], out: &mut impl Write) -> io::Result<()> {
+pub fn display_animation(
+    frames: &[(Vec<u8>, u32)],
+    out: &mut impl Write,
+    mux_stack: &[Mux],
+) -> io::Result<()> {
     if frames.is_empty() {
         return Ok(());
     }
     if frames.len() == 1 {
-        return display_png(&frames[0].0, out);
+        return display_png(&frames[0].0, out, mux_stack);
     }
 
     let mut buf = Vec::new();
     const ID: u32 = 1;
 
     // Base frame (frame 1)
-    write_frame_data(&mut buf, &frames[0].0, &format!("a=T,f=100,i={ID},q=2"))?;
+    write_frame_data(&mut buf, &frames[0].0, &format!("a=T,f=100,i={ID},q=2"), mux_stack)?;
 
     // Additional frames
     for (i, (png_data, delay_ms)) in frames.iter().enumerate().skip(1) {
@@ -97,15 +94,18 @@ pub fn display_animation(frames: &[(Vec<u8>, u32)], out: &mut impl Write) -> io:
             &mut buf,
             png_data,
             &format!("a=f,i={ID},r={r},z={delay_ms},f=100,q=2"),
+            mux_stack,
         )?;
     }
 
     // Set frame 1's gap and start looping (s=3 = loop, v=1 = start)
     let first_delay = frames[0].1;
+    let mut apc = Vec::new();
     write!(
-        buf,
+        apc,
         "\x1b_Ga=a,i={ID},r=1,z={first_delay},s=3,v=1,q=2;\x1b\\"
     )?;
+    write_apc(&mut buf, &apc, mux_stack);
 
     out.write_all(&buf)?;
     out.flush()
@@ -119,7 +119,7 @@ mod tests {
     fn single_chunk_format() {
         let data = b"tiny";
         let mut out = Vec::new();
-        display_png(data, &mut out).unwrap();
+        display_png(data, &mut out, &[]).unwrap();
         let output = String::from_utf8(out).unwrap();
         assert!(output.starts_with("\x1b_Ga=T,f=100;"));
         assert!(output.ends_with("\x1b\\"));
@@ -130,7 +130,7 @@ mod tests {
     fn multi_chunk_format() {
         let data = vec![0xABu8; 4000];
         let mut out = Vec::new();
-        display_png(&data, &mut out).unwrap();
+        display_png(&data, &mut out, &[]).unwrap();
         let output = String::from_utf8(out).unwrap();
         assert!(output.starts_with("\x1b_Ga=T,f=100,m=1;"));
         assert!(output.contains("m=0;"));
@@ -141,7 +141,7 @@ mod tests {
     fn all_chunks_terminated() {
         let data = vec![0u8; 8000];
         let mut out = Vec::new();
-        display_png(&data, &mut out).unwrap();
+        display_png(&data, &mut out, &[]).unwrap();
         let output = String::from_utf8(out).unwrap();
         let starts = output.matches("\x1b_G").count();
         let ends = output.matches("\x1b\\").count();
@@ -152,7 +152,7 @@ mod tests {
     fn payload_is_valid_base64() {
         let data = b"hello kitty";
         let mut out = Vec::new();
-        display_png(data, &mut out).unwrap();
+        display_png(data, &mut out, &[]).unwrap();
         let output = String::from_utf8(out).unwrap();
         let payload_start = output.find(';').unwrap() + 1;
         let payload_end = output.rfind("\x1b\\").unwrap();
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn empty_input() {
         let mut out = Vec::new();
-        display_png(b"", &mut out).unwrap();
+        display_png(b"", &mut out, &[]).unwrap();
         let output = String::from_utf8(out).unwrap();
         assert!(output.starts_with("\x1b_Ga=T,f=100;"));
         assert!(output.ends_with("\x1b\\"));
@@ -176,9 +176,8 @@ mod tests {
     fn animation_single_frame_delegates_to_display_png() {
         let frame = vec![(b"single".to_vec(), 100u32)];
         let mut out = Vec::new();
-        display_animation(&frame, &mut out).unwrap();
+        display_animation(&frame, &mut out, &[]).unwrap();
         let output = String::from_utf8(out).unwrap();
-        // Should be a plain single image, no animation commands
         assert!(output.starts_with("\x1b_Ga=T,f=100;"));
         assert!(!output.contains("a=f"));
         assert!(!output.contains("a=a"));
@@ -192,15 +191,103 @@ mod tests {
             (b"frame3".to_vec(), 200),
         ];
         let mut out = Vec::new();
-        display_animation(&frames, &mut out).unwrap();
+        display_animation(&frames, &mut out, &[]).unwrap();
         let output = String::from_utf8(out).unwrap();
 
-        // Base frame with image ID
         assert!(output.contains("a=T,f=100,i=1"));
-        // Additional frames
         assert!(output.contains("a=f,i=1,r=2,z=150"));
         assert!(output.contains("a=f,i=1,r=3,z=200"));
-        // Animation start command with frame 1 gap and loop
         assert!(output.contains("a=a,i=1,r=1,z=100,s=3,v=1"));
+    }
+
+    // ── tmux wrapping tests ─────────────────────────────────
+
+    #[test]
+    fn tmux_single_chunk_wrapped() {
+        let data = b"tiny";
+        let mut out = Vec::new();
+        let stack = [Mux::Tmux(None)];
+        display_png(data, &mut out, &stack).unwrap();
+        assert!(out.starts_with(b"\x1bPtmux;"));
+        assert!(out.ends_with(b"\x1b\\"));
+        assert!(out.windows(3).any(|w| w == b"\x1b\x1b_"));
+    }
+
+    #[test]
+    fn tmux_multi_chunk_each_wrapped() {
+        let data = vec![0xABu8; 4000];
+        let mut out = Vec::new();
+        let stack = [Mux::Tmux(None)];
+        display_png(&data, &mut out, &stack).unwrap();
+        let tmux_starts = out.windows(7).filter(|w| *w == b"\x1bPtmux;").count();
+        assert!(tmux_starts >= 2, "each chunk must be independently wrapped");
+    }
+
+    #[test]
+    fn tmux_animation_start_wrapped() {
+        let frames = vec![
+            (b"f1".to_vec(), 100u32),
+            (b"f2".to_vec(), 150),
+        ];
+        let mut out = Vec::new();
+        let stack = [Mux::Tmux(None)];
+        display_animation(&frames, &mut out, &stack).unwrap();
+        let tmux_starts = out.windows(7).filter(|w| *w == b"\x1bPtmux;").count();
+        assert!(tmux_starts >= 3, "animation start APC must also be wrapped");
+    }
+
+    #[test]
+    fn screen_single_chunk_wrapped() {
+        let data = b"tiny";
+        let mut out = Vec::new();
+        let stack = [Mux::Screen(None)];
+        display_png(data, &mut out, &stack).unwrap();
+        assert!(out.starts_with(b"\x1bP"));
+        assert!(!out.starts_with(b"\x1bPtmux;"));
+        assert!(out.windows(2).any(|w| w == b"\x1b_"));
+    }
+
+    #[test]
+    fn no_mux_passthrough() {
+        let data = b"tiny";
+        let mut out = Vec::new();
+        display_png(data, &mut out, &[]).unwrap();
+        assert!(!out.starts_with(b"\x1bP"));
+        assert!(out.starts_with(b"\x1b_G"));
+    }
+
+    #[test]
+    fn zellij_no_wrapping() {
+        let data = b"tiny";
+        let mut out = Vec::new();
+        let stack = [Mux::Zellij];
+        display_png(data, &mut out, &stack).unwrap();
+        assert!(!out.starts_with(b"\x1bP"));
+        assert!(out.starts_with(b"\x1b_G"));
+    }
+
+    #[test]
+    fn double_tmux_wrapping() {
+        let data = b"tiny";
+        let mut out = Vec::new();
+        let stack = [Mux::Tmux(None), Mux::Tmux(None)];
+        display_png(data, &mut out, &stack).unwrap();
+        // Outer tmux wrapper
+        assert!(out.starts_with(b"\x1bPtmux;"));
+        // Should contain a nested tmux wrapper (ESC P tmux; with doubled ESC)
+        assert!(out.windows(8).any(|w| w == b"\x1b\x1bPtmux;"));
+    }
+
+    #[test]
+    fn tmux_in_screen_wrapping() {
+        let data = b"tiny";
+        let mut out = Vec::new();
+        let stack = [Mux::Tmux(None), Mux::Screen(None)];
+        display_png(data, &mut out, &stack).unwrap();
+        // Outer screen wrapper
+        assert!(out.starts_with(b"\x1bP"));
+        assert!(!out.starts_with(b"\x1bPtmux;"));
+        // Inner tmux wrapper should be present inside the screen DCS
+        assert!(out.windows(7).any(|w| w == b"\x1bPtmux;"));
     }
 }

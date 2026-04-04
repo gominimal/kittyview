@@ -3,12 +3,46 @@
 mod kitty;
 mod logo;
 mod svg;
+mod terminal;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use terminal::Mux;
+
+/// Parse the `--passthrough` flag value into a mux stack.
+///
+/// Accepts: `auto`, `off`, or a comma-separated list of `tmux`/`screen`
+/// (innermost first). Examples: `tmux`, `tmux,tmux`, `tmux,screen`.
+fn parse_passthrough(s: &str) -> Result<Option<Vec<Mux>>, String> {
+    let s = s.trim();
+    match s {
+        "auto" => Ok(None),
+        "off" => Ok(Some(vec![])),
+        _ => {
+            let mut stack = Vec::new();
+            for part in s.split(',') {
+                let part = part.trim();
+                match part {
+                    "tmux" => stack.push(Mux::Tmux(None)),
+                    "screen" => stack.push(Mux::Screen(None)),
+                    _ => {
+                        return Err(format!(
+                            "invalid passthrough value '{part}': expected 'auto', 'off', \
+                             or comma-separated list of 'tmux'/'screen' (e.g. 'tmux,tmux')"
+                        ));
+                    }
+                }
+            }
+            if stack.is_empty() {
+                return Err("empty passthrough value".to_string());
+            }
+            Ok(Some(stack))
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -32,9 +66,14 @@ struct Cli {
     #[arg(long, global = true)]
     animate: bool,
 
-    /// SVG external resource access policy [default: none]
+    /// SVG external resource access policy
     #[arg(long, value_enum, global = true, default_value_t)]
     svg_resources: svg::SvgResources,
+
+    /// Multiplexer passthrough: auto, off, or comma-separated tmux/screen layers
+    /// (e.g. tmux, tmux,tmux, tmux,screen)
+    #[arg(long, global = true, default_value = "auto")]
+    passthrough: String,
 }
 
 #[derive(Subcommand)]
@@ -221,34 +260,78 @@ fn write_output(data: &[u8], path: Option<&std::path::Path>) -> Result<(), Strin
     }
 }
 
-/// Check that it's safe to emit kitty escape sequences.
-fn check_terminal(force: bool) -> Result<(), String> {
-    if force {
-        return Ok(());
-    }
-    if !io::stdout().is_terminal() {
+/// Detect the terminal and multiplexer, check kitty graphics support.
+///
+/// Returns the detected mux stack (for passthrough wrapping) or an error if the
+/// terminal doesn't support kitty graphics and `--force` is not set.
+fn check_terminal(
+    force: bool,
+    passthrough: &str,
+) -> Result<Vec<Mux>, String> {
+    if !force && !io::stdout().is_terminal() {
         return Err(
             "stdout is not a terminal (use --force to emit escape sequences anyway, \
              or use the 'png' subcommand to export as PNG)"
                 .to_string(),
         );
     }
-    if !kitty::is_supported() {
-        return Err(
-            "Terminal does not appear to support kitty graphics protocol \
-             (use --force to try anyway)"
-                .to_string(),
-        );
+
+    let parsed = parse_passthrough(passthrough)?;
+
+    // When force is set without an explicit passthrough mode, skip detection
+    // to avoid the query timeout delay.
+    if force && parsed.is_none() {
+        return Ok(vec![]);
     }
-    Ok(())
+
+    // Resolve the mux stack.
+    let mux_stack = match parsed {
+        Some(stack) => stack,
+        None => {
+            let info = terminal::detect();
+
+            if !force && !info.supports_kitty_graphics() {
+                let mut msg = format!(
+                    "Terminal ({}) does not appear to support kitty graphics protocol",
+                    info.terminal
+                );
+                if !info.mux_stack.is_empty() {
+                    let mux_desc: Vec<String> =
+                        info.mux_stack.iter().map(|m| m.to_string()).collect();
+                    msg.push_str(&format!(
+                        " (detected multiplexer{}: {})",
+                        if info.mux_stack.len() > 1 { "s" } else { "" },
+                        mux_desc.join(" > "),
+                    ));
+                    if info.mux_stack.iter().any(|m| matches!(m, Mux::Tmux(_))) {
+                        msg.push_str(
+                            "\nHint: ensure the outer terminal supports kitty graphics \
+                             and add `set -g allow-passthrough on` to your tmux.conf",
+                        );
+                    }
+                }
+                msg.push_str(" (use --force to try anyway)");
+                return Err(msg);
+            }
+
+            info.mux_stack
+        }
+    };
+
+    Ok(mux_stack)
 }
 
 /// Display frames to stdout -- animation if multi-frame, static if single.
-fn display_frames(frames: &[(Vec<u8>, u32)], out: &mut impl Write) -> Result<(), String> {
+fn display_frames(
+    frames: &[(Vec<u8>, u32)],
+    out: &mut impl Write,
+    mux_stack: &[Mux],
+) -> Result<(), String> {
     if frames.len() > 1 {
-        kitty::display_animation(frames, out).map_err(|e| format!("Failed to write: {e}"))
+        kitty::display_animation(frames, out, mux_stack)
+            .map_err(|e| format!("Failed to write: {e}"))
     } else if let Some((png, _)) = frames.first() {
-        kitty::display_png(png, out).map_err(|e| format!("Failed to write: {e}"))
+        kitty::display_png(png, out, mux_stack).map_err(|e| format!("Failed to write: {e}"))
     } else {
         Ok(())
     }
@@ -259,14 +342,14 @@ fn run() -> Result<(), String> {
 
     match cli.command {
         Some(Commands::Logo) => {
-            check_terminal(cli.force)?;
+            let mux_stack = check_terminal(cli.force, &cli.passthrough)?;
             let mut stdout = io::stdout().lock();
             if cli.animate {
                 let frames = logo::generate_animated_logo();
-                display_frames(&frames, &mut stdout)?;
+                display_frames(&frames, &mut stdout, &mux_stack)?;
             } else {
                 let png = logo::generate_logo_png();
-                kitty::display_png(&png, &mut stdout)
+                kitty::display_png(&png, &mut stdout, &mux_stack)
                     .map_err(|e| format!("Failed to write: {e}"))?;
             }
             writeln!(stdout).map_err(|e| format!("Failed to write: {e}"))?;
@@ -295,7 +378,7 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         None => {
-            check_terminal(cli.force)?;
+            let mux_stack = check_terminal(cli.force, &cli.passthrough)?;
             let mut stdout = io::stdout().lock();
 
             if cli.animate {
@@ -306,7 +389,7 @@ fn run() -> Result<(), String> {
                         return Err("No image file specified. Use --help for usage.".to_string());
                     }
                 };
-                display_frames(&frames, &mut stdout)?;
+                display_frames(&frames, &mut stdout, &mux_stack)?;
             } else {
                 let png = match cli.file {
                     Some(path) => load_image_as_png(&path, cli.svg_resources)?,
@@ -315,7 +398,7 @@ fn run() -> Result<(), String> {
                         return Err("No image file specified. Use --help for usage.".to_string());
                     }
                 };
-                kitty::display_png(&png, &mut stdout)
+                kitty::display_png(&png, &mut stdout, &mux_stack)
                     .map_err(|e| format!("Failed to write: {e}"))?;
             }
 
