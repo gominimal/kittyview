@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4
 
 - **Terminal multiplexer passthrough**: kittyview now auto-detects tmux and GNU screen via in-band terminal queries (XTVERSION, DA2) and automatically wraps kitty graphics sequences in DCS passthrough envelopes. Requires `set -g allow-passthrough on` in tmux.conf.
 - **Nested multiplexer support**: detects and wraps through multiple multiplexer layers (e.g. tmux-in-tmux, tmux-in-screen). Each layer is probed recursively up to 4 levels deep.
