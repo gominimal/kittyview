@@ -16,4 +16,4 @@ packages = ["base", "emacs", "emacs-config-dev1", "claude-code", "less", "mermai
 exec = "bash --noprofile -l"
 
 [session]
-packages = ["emacs", "kittyview", "mermaid-cli", "less", "claude-code", "emacs-config-dev1", "rust"]
+packages = ["emacs", "kittyview", "mermaid-cli", "less", "claude-code", "emacs-config-dev1", "rust", "gh"]

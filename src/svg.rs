@@ -397,7 +397,7 @@ pub fn convert_foreign_objects(svg_data: &[u8]) -> Vec<u8> {
 
     // Apply replacements in reverse order so byte offsets remain valid.
     let mut result = svg_str.to_string();
-    replacements.sort_by(|a, b| b.start.cmp(&a.start));
+    replacements.sort_by_key(|r| std::cmp::Reverse(r.start));
 
     for info in &replacements {
         let text_elem = build_text_element(info);
