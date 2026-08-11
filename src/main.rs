@@ -193,7 +193,7 @@ fn decode_gif_frames(data: &[u8]) -> Result<Vec<(Vec<u8>, u32)>, String> {
     let mut result = Vec::with_capacity(frames.len());
     for frame in frames {
         let (numer, denom) = frame.delay().numer_denom_ms();
-        let delay_ms = if denom == 0 { 100 } else { numer / denom };
+        let delay_ms = numer.checked_div(denom).unwrap_or(100);
         let delay_ms = delay_ms.max(20); // floor at 20ms to prevent 0-delay spam
 
         let img = image::DynamicImage::ImageRgba8(frame.into_buffer());

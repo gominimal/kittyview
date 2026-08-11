@@ -3,7 +3,7 @@
 [upstream] # Source of software & tooling
 repo = "https://github.com/gominimal/pkgs"
 branch = "main"
-locked_commit = "e777da8a8125802a13b36b3238d11dd24b505f4c"
+locked_commit = "527251ff5cabaaf220f89cd7b905b809efd97a76"
 
 [harness]
 use = "rust"
@@ -14,3 +14,6 @@ state_key = "dev"
 [tasks.shell]
 packages = ["base", "emacs", "emacs-config-dev1", "claude-code", "less", "mermaid-cli"]
 exec = "bash --noprofile -l"
+
+[session]
+packages = ["emacs", "kittyview", "mermaid-cli", "less", "claude-code", "emacs-config-dev1", "rust", "gh"]
