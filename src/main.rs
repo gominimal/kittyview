@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod geometry;
 mod kitty;
 mod logo;
+mod placeholder;
 mod svg;
 mod terminal;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
+use kitty::Placement;
 use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::process::ExitCode;
-use terminal::Mux;
+use std::process::{Command, ExitCode};
+use terminal::{Mux, Terminal};
 
 /// Parse the `--passthrough` flag value into a mux stack.
 ///
@@ -74,6 +77,23 @@ struct Cli {
     /// (e.g. tmux, tmux,tmux, tmux,screen)
     #[arg(long, global = true, default_value = "auto")]
     passthrough: String,
+
+    /// How images are anchored to the screen: auto, unicode (placeholder cells
+    /// that scroll with the text), or direct (terminal-positioned)
+    #[arg(long, value_enum, global = true, default_value_t)]
+    placement: PlacementMode,
+}
+
+/// User-facing choice of image anchoring.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum PlacementMode {
+    /// Unicode placeholders wherever the terminal understands them.
+    #[default]
+    Auto,
+    /// Always anchor to Unicode placeholder cells.
+    Unicode,
+    /// Always let the terminal position the image itself.
+    Direct,
 }
 
 #[derive(Subcommand)]
@@ -260,11 +280,42 @@ fn write_output(data: &[u8], path: Option<&std::path::Path>) -> Result<(), Strin
     }
 }
 
+/// What we are drawing into: the multiplexer layers to wrap for, and the
+/// terminal underneath them.
+struct Target {
+    mux_stack: Vec<Mux>,
+    terminal: Terminal,
+}
+
+impl Target {
+    /// Whether images should be anchored to Unicode placeholder cells.
+    ///
+    /// Under a multiplexer this is the only anchoring that behaves: a directly
+    /// placed image is positioned by the terminal, which knows nothing of the
+    /// multiplexer's panes or scrollback, so it stays pinned to the screen
+    /// while the text beneath it scrolls away. Placeholder cells are ordinary
+    /// text, so the multiplexer scrolls and clips them like anything else.
+    fn use_placeholders(&self, mode: PlacementMode) -> bool {
+        match mode {
+            PlacementMode::Unicode => true,
+            PlacementMode::Direct => false,
+            PlacementMode::Auto => {
+                let info = terminal::TerminalInfo {
+                    mux_stack: self.mux_stack.clone(),
+                    terminal: self.terminal.clone(),
+                };
+                info.supports_unicode_placeholders()
+            }
+        }
+    }
+}
+
 /// Detect the terminal and multiplexer, check kitty graphics support.
 ///
-/// Returns the detected mux stack (for passthrough wrapping) or an error if the
-/// terminal doesn't support kitty graphics and `--force` is not set.
-fn check_terminal(force: bool, passthrough: &str) -> Result<Vec<Mux>, String> {
+/// Returns the detected target (for passthrough wrapping and placement
+/// selection) or an error if the terminal doesn't support kitty graphics and
+/// `--force` is not set.
+fn check_terminal(force: bool, passthrough: &str) -> Result<Target, String> {
     if !force && !io::stdout().is_terminal() {
         return Err(
             "stdout is not a terminal (use --force to emit escape sequences anyway, \
@@ -278,12 +329,16 @@ fn check_terminal(force: bool, passthrough: &str) -> Result<Vec<Mux>, String> {
     // When force is set without an explicit passthrough mode, skip detection
     // to avoid the query timeout delay.
     if force && parsed.is_none() {
-        return Ok(vec![]);
+        return Ok(Target {
+            mux_stack: vec![],
+            terminal: Terminal::Unknown,
+        });
     }
 
     // Resolve the mux stack.
-    let mux_stack = match parsed {
-        Some(stack) => stack,
+    let (mux_stack, terminal) = match parsed {
+        // An explicit stack skips detection, so the terminal stays unidentified.
+        Some(stack) => (stack, Terminal::Unknown),
         None => {
             let info = terminal::detect();
 
@@ -311,11 +366,62 @@ fn check_terminal(force: bool, passthrough: &str) -> Result<Vec<Mux>, String> {
                 return Err(msg);
             }
 
-            info.mux_stack
+            (info.mux_stack, info.terminal)
         }
     };
 
-    Ok(mux_stack)
+    warn_if_tmux_passthrough_disabled(&mux_stack);
+
+    Ok(Target {
+        mux_stack,
+        terminal,
+    })
+}
+
+/// Warn when tmux is configured to drop the escape sequences we are about to
+/// send, which would otherwise look like kittyview silently doing nothing.
+fn warn_if_tmux_passthrough_disabled(mux_stack: &[Mux]) {
+    if !mux_stack.iter().any(|m| matches!(m, Mux::Tmux(_))) || std::env::var_os("TMUX").is_none() {
+        return;
+    }
+    let Ok(out) = Command::new("tmux")
+        .args(["show", "-gv", "allow-passthrough"])
+        .output()
+    else {
+        return;
+    };
+    if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "off" {
+        eprintln!(
+            "Warning: tmux `allow-passthrough` is off, so the image data will not reach \
+             the terminal.\nAdd `set -g allow-passthrough on` to your tmux.conf."
+        );
+    }
+}
+
+/// Decide how to anchor an image of `png`'s dimensions.
+///
+/// Falls back to direct placement when the image rectangle cannot be worked
+/// out, which is better than emitting a placeholder grid of the wrong shape.
+fn placement_for(png: &[u8], mux_stack: &[Mux], use_placeholders: bool) -> Placement {
+    if !use_placeholders {
+        return Placement::Direct;
+    }
+    let Some((px_w, px_h)) = geometry::png_dimensions(png) else {
+        return Placement::Direct;
+    };
+
+    let geom = geometry::detect(mux_stack);
+    let max_cells = u16::try_from(placeholder::MAX_INDEX + 1).unwrap_or(u16::MAX);
+    let (cols, rows) = geometry::image_cells(px_w, px_h, &geom, max_cells);
+    if cols == 0 || rows == 0 {
+        return Placement::Direct;
+    }
+
+    Placement::Virtual {
+        image_id: kitty::pick_image_id(),
+        cols,
+        rows,
+    }
 }
 
 /// Display frames to stdout -- animation if multi-frame, static if single.
@@ -323,15 +429,32 @@ fn display_frames(
     frames: &[(Vec<u8>, u32)],
     out: &mut impl Write,
     mux_stack: &[Mux],
+    placement: Placement,
 ) -> Result<(), String> {
     if frames.len() > 1 {
-        kitty::display_animation(frames, out, mux_stack)
+        kitty::display_animation(frames, out, mux_stack, placement)
             .map_err(|e| format!("Failed to write: {e}"))
     } else if let Some((png, _)) = frames.first() {
-        kitty::display_png(png, out, mux_stack).map_err(|e| format!("Failed to write: {e}"))
+        kitty::display_png(png, out, mux_stack, placement)
+            .map_err(|e| format!("Failed to write: {e}"))
     } else {
         Ok(())
     }
+}
+
+/// Display frames, sizing the placement from the first frame.
+fn display_sized_frames(
+    frames: &[(Vec<u8>, u32)],
+    out: &mut impl Write,
+    target: &Target,
+    mode: PlacementMode,
+) -> Result<(), String> {
+    let use_placeholders = target.use_placeholders(mode);
+    let placement = match frames.first() {
+        Some((png, _)) => placement_for(png, &target.mux_stack, use_placeholders),
+        None => return Ok(()),
+    };
+    display_frames(frames, out, &target.mux_stack, placement)
 }
 
 fn run() -> Result<(), String> {
@@ -339,16 +462,14 @@ fn run() -> Result<(), String> {
 
     match cli.command {
         Some(Commands::Logo) => {
-            let mux_stack = check_terminal(cli.force, &cli.passthrough)?;
-            let mut stdout = io::stdout().lock();
-            if cli.animate {
-                let frames = logo::generate_animated_logo();
-                display_frames(&frames, &mut stdout, &mux_stack)?;
+            let target = check_terminal(cli.force, &cli.passthrough)?;
+            let frames = if cli.animate {
+                logo::generate_animated_logo()
             } else {
-                let png = logo::generate_logo_png();
-                kitty::display_png(&png, &mut stdout, &mux_stack)
-                    .map_err(|e| format!("Failed to write: {e}"))?;
-            }
+                vec![(logo::generate_logo_png(), 0)]
+            };
+            let mut stdout = io::stdout().lock();
+            display_sized_frames(&frames, &mut stdout, &target, cli.placement)?;
             writeln!(stdout).map_err(|e| format!("Failed to write: {e}"))?;
             Ok(())
         }
@@ -375,18 +496,16 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         None => {
-            let mux_stack = check_terminal(cli.force, &cli.passthrough)?;
-            let mut stdout = io::stdout().lock();
+            let target = check_terminal(cli.force, &cli.passthrough)?;
 
-            if cli.animate {
-                let frames = match cli.file {
+            let frames = if cli.animate {
+                match cli.file {
                     Some(path) => load_animated_image(&path, cli.svg_resources)?,
                     None if !io::stdin().is_terminal() => load_animated_stdin(cli.svg_resources)?,
                     None => {
                         return Err("No image file specified. Use --help for usage.".to_string());
                     }
-                };
-                display_frames(&frames, &mut stdout, &mux_stack)?;
+                }
             } else {
                 let png = match cli.file {
                     Some(path) => load_image_as_png(&path, cli.svg_resources)?,
@@ -395,10 +514,11 @@ fn run() -> Result<(), String> {
                         return Err("No image file specified. Use --help for usage.".to_string());
                     }
                 };
-                kitty::display_png(&png, &mut stdout, &mux_stack)
-                    .map_err(|e| format!("Failed to write: {e}"))?;
-            }
+                vec![(png, 0)]
+            };
 
+            let mut stdout = io::stdout().lock();
+            display_sized_frames(&frames, &mut stdout, &target, cli.placement)?;
             writeln!(stdout).map_err(|e| format!("Failed to write: {e}"))?;
             Ok(())
         }

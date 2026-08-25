@@ -10,7 +10,7 @@ kittyview renders PNG, JPEG, SVG, and many other image formats directly in your 
 
 ## Supported terminals
 
-kittyview auto-detects support via environment variables. Confirmed compatible terminals:
+kittyview auto-detects support with in-band terminal queries, falling back to environment variables when no terminal I/O is available. Confirmed compatible terminals:
 
 - [kitty](https://sw.kovidgoyal.net/kitty/)
 - [Ghostty](https://ghostty.org/)
@@ -64,6 +64,44 @@ kittyview --animate logo
 ```
 
 Animation support requires a terminal with kitty animation protocol support (currently kitty; Ghostty and others may show only the first frame).
+
+### Terminal multiplexers
+
+kittyview works inside tmux, GNU screen, and zellij. Multiplexer layers are auto-detected with in-band terminal queries, and graphics sequences are wrapped in DCS passthrough envelopes so they reach the outer terminal. Nested layers (tmux-in-tmux, tmux-in-screen) are detected and wrapped for each level.
+
+tmux drops passthrough sequences unless it is configured to forward them:
+
+```
+# ~/.tmux.conf
+set -g allow-passthrough on
+```
+
+kittyview warns when it detects that this setting is off, since the symptom is otherwise an image that simply never appears.
+
+Detection can be overridden with `--passthrough`:
+
+```
+# Skip detection and assume no multiplexer
+kittyview --passthrough off photo.jpg
+
+# Specify the stack explicitly, outermost last
+kittyview --passthrough tmux photo.jpg
+kittyview --passthrough tmux,screen photo.jpg
+```
+
+### Image placement
+
+Images can be anchored to the screen two ways, selected with `--placement`:
+
+| Mode                | Behaviour                                                                   |
+|---------------------|-----------------------------------------------------------------------------|
+| `auto` (default)    | Unicode placeholders where the terminal supports them, direct otherwise.     |
+| `unicode`           | Always anchor to Unicode placeholder cells.                                  |
+| `direct`            | Always let the terminal position the image itself.                           |
+
+With `direct` placement the terminal owns the image's position, so it stays pinned where it was first drawn while the text around it scrolls away. Unicode placeholders occupy ordinary text cells, so the image scrolls, clips, and redraws with the surrounding output -- which is what makes images behave correctly under multiplexers and pagers.
+
+`auto` uses placeholders everywhere except Konsole and iTerm2, which do not implement them.
 
 ### Convert to PNG
 

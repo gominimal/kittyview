@@ -59,6 +59,17 @@ impl TerminalInfo {
         )
     }
 
+    /// Whether the detected terminal can display images anchored to Unicode
+    /// placeholder cells (kitty graphics `U=1`).
+    ///
+    /// Terminals we could not identify are given the benefit of the doubt:
+    /// detection is skipped entirely under `--force` and an explicit
+    /// `--passthrough`, and placeholders are what make images behave the same
+    /// way everywhere.
+    pub fn supports_unicode_placeholders(&self) -> bool {
+        !matches!(self.terminal, Terminal::Konsole(_) | Terminal::ITerm2)
+    }
+
     /// Whether output needs DCS passthrough wrapping.
     #[allow(dead_code)]
     pub fn needs_passthrough(&self) -> bool {
@@ -449,7 +460,7 @@ fn detect_terminal_env() -> Terminal {
 // ─── Platform I/O: Unix ─────────────────────────────────────
 
 #[cfg(unix)]
-mod tty {
+pub(crate) mod tty {
     use super::*;
     use std::os::unix::io::{AsRawFd, RawFd};
 
@@ -557,6 +568,16 @@ mod tty {
         }
     }
 
+    impl QuerySession {
+        /// Send an arbitrary query and read the response, if any.
+        ///
+        /// Exposed so callers outside detection (e.g. geometry probing) can
+        /// reuse one raw-mode session for several queries.
+        pub fn ask(&mut self, request: &[u8], timeout: Duration) -> Option<Vec<u8>> {
+            <Self as TerminalQuerier>::query(self, request, timeout)
+        }
+    }
+
     impl TerminalQuerier for QuerySession {
         fn query(&mut self, request: &[u8], timeout: Duration) -> Option<Vec<u8>> {
             self.drain();
@@ -658,10 +679,24 @@ fn is_response_complete(buf: &[u8]) -> bool {
         return buf.windows(3).any(|w| w == b"\x1b[>");
     }
 
+    // XTWINOPS report: ESC [ Ps ; Ps ; Ps t
+    if buf[len - 1] == b't' && len >= 6 {
+        return buf.windows(2).any(|w| w == b"\x1b[");
+    }
+
     false
 }
 
 // ─── Public API ─────────────────────────────────────────────
+
+/// Open a session for sending escape-sequence queries to the terminal.
+///
+/// Returns `None` when no terminal is reachable (or on non-Unix platforms,
+/// where in-band querying is not implemented).
+#[cfg(unix)]
+pub fn query_session() -> Option<tty::QuerySession> {
+    tty::QuerySession::open().ok()
+}
 
 /// Detect the terminal emulator and any multiplexer layers.
 ///
