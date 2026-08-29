@@ -67,12 +67,68 @@ pub fn diacritic(n: usize) -> Option<char> {
     DIACRITICS.get(n).and_then(|&c| char::from_u32(c))
 }
 
+/// How much of an image ID the placeholder cells can carry intact.
+///
+/// An ID is split across two carriers: its low bits ride in the cells'
+/// foreground colour, and its top byte rides in a third combining diacritic.
+/// The diacritic is ordinary text and survives anything that handles text, so
+/// the only question is which foreground colour form gets through -- which
+/// depends on what sits between us and the terminal.
+///
+/// Both spaces are used the same way: draw an index at random and hand it to
+/// [`IdSpace::id_at`]. IDs are global to the terminal session and shared with
+/// every other program drawing into it, and transmitting under an ID that is
+/// already in use replaces that image and drops the placements drawing it --
+/// blanking an image that may still be sitting in scrollback. Nothing
+/// coordinates the namespace, so the size of the space is the whole defence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdSpace {
+    /// Low byte only, carried by a 256-colour SGR: 65 280 IDs.
+    ///
+    /// Multiplexers relay 256-colour SGR verbatim, but rewrite truecolor when
+    /// the outer terminal does not advertise it. A rewritten colour is a
+    /// different image ID, so the placeholder cells would name an image that
+    /// was never transmitted and nothing would be drawn at all.
+    MuxSafe,
+    /// Low 24 bits, carried by a truecolor SGR: 4 294 967 040 IDs.
+    ///
+    /// For output going straight to the terminal, where the colour arrives as
+    /// written.
+    Full,
+}
+
+impl IdSpace {
+    /// The number of distinct IDs in this space. None of them is zero.
+    pub const fn capacity(self) -> u32 {
+        // Every value of the top byte, paired with every non-zero low half.
+        self.low_span() * 256
+    }
+
+    /// The `n`th ID in this space, with `n` reduced modulo
+    /// [`capacity`](IdSpace::capacity).
+    pub const fn id_at(self, n: u32) -> u32 {
+        let span = self.low_span();
+        let n = n % self.capacity();
+        // The low half is 1-based: an image ID of zero means "no image", and
+        // it keeps the ID non-zero whatever the top byte is.
+        ((n / span) << 24) | (n % span + 1)
+    }
+
+    /// How many non-zero values the foreground colour can carry.
+    const fn low_span(self) -> u32 {
+        match self {
+            IdSpace::MuxSafe => 0xFF,
+            IdSpace::Full => 0x00FF_FFFF,
+        }
+    }
+}
+
 /// SGR sequence selecting `image_id`'s low 24 bits as the foreground colour.
 ///
 /// IDs that fit in a byte use the 256-colour form, which multiplexers relay
-/// verbatim. The 24-bit form is only reachable for larger IDs, where tmux may
-/// degrade the colour if the outer terminal lacks truecolor -- so callers that
-/// care about surviving a multiplexer should stick to 8-bit IDs.
+/// verbatim; larger IDs need the 24-bit form, which tmux may degrade when the
+/// outer terminal lacks truecolor. [`IdSpace`] is how callers choose which of
+/// those they are relying on.
 fn fg_sgr(image_id: u32) -> String {
     let low = image_id & 0x00FF_FFFF;
     if low <= 0xFF {
@@ -161,6 +217,66 @@ mod tests {
         assert_eq!(fg_sgr(0x010203), "\x1b[38;2;1;2;3m");
         // The most significant byte is carried by a diacritic, not the colour.
         assert_eq!(fg_sgr(0x02_000042), "\x1b[38;5;66m");
+    }
+
+    #[test]
+    fn id_space_capacities() {
+        assert_eq!(IdSpace::MuxSafe.capacity(), 255 * 256);
+        assert_eq!(IdSpace::Full.capacity(), 0x00FF_FFFF * 256);
+    }
+
+    #[test]
+    fn mux_safe_ids_all_use_the_256_colour_form() {
+        // The whole point of the narrow space: whatever index we land on, the
+        // colour carrying it is one a multiplexer relays untouched.
+        for n in 0..IdSpace::MuxSafe.capacity() {
+            let id = IdSpace::MuxSafe.id_at(n);
+            assert!(
+                fg_sgr(id).starts_with("\x1b[38;5;"),
+                "index {n} gave {id:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn mux_safe_space_is_exhausted_before_an_id_repeats() {
+        let capacity = IdSpace::MuxSafe.capacity();
+        let ids: std::collections::HashSet<u32> =
+            (0..capacity).map(|n| IdSpace::MuxSafe.id_at(n)).collect();
+        assert_eq!(ids.len(), capacity as usize);
+    }
+
+    #[test]
+    fn full_space_ids_are_distinct() {
+        // Walking 4.29e9 indices would be silly; a uniform stride across the
+        // space reaches every top byte instead.
+        let stride = IdSpace::Full.capacity() / 100_000;
+        let ids: std::collections::HashSet<u32> = (0..100_000)
+            .map(|i| IdSpace::Full.id_at(i * stride))
+            .collect();
+        assert_eq!(ids.len(), 100_000);
+    }
+
+    #[test]
+    fn ids_are_never_zero_and_always_encodable() {
+        for space in [IdSpace::MuxSafe, IdSpace::Full] {
+            let capacity = space.capacity();
+            for n in [0, 1, 254, 255, 256, capacity - 1, capacity, capacity + 7] {
+                let id = space.id_at(n);
+                assert_ne!(id, 0, "{space:?} at index {n}");
+                // The top byte has to name a diacritic or it cannot be sent.
+                let top = ((id >> 24) & 0xFF) as usize;
+                assert!(diacritic(top).is_some(), "{space:?} top byte {top}");
+            }
+        }
+    }
+
+    #[test]
+    fn id_at_wraps_at_capacity() {
+        for space in [IdSpace::MuxSafe, IdSpace::Full] {
+            assert_eq!(space.id_at(space.capacity()), space.id_at(0));
+            assert_eq!(space.id_at(space.capacity() + 9), space.id_at(9));
+        }
     }
 
     #[test]

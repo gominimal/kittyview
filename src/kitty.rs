@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::placeholder;
+use crate::placeholder::{self, IdSpace};
 use crate::terminal::{Mux, wrap_for_stack};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher as _, Hasher as _};
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum bytes of base64 data per chunk (kitty protocol limit).
 const CHUNK_SIZE: usize = 4096;
@@ -105,14 +108,41 @@ fn write_frame_data(
 
 /// Pick an image ID for this invocation.
 ///
-/// IDs are kept to a single byte so that the foreground colour carrying them
-/// survives a multiplexer: tmux relays 256-colour SGR verbatim, but rewrites
-/// truecolor when the outer terminal does not advertise it, which would
-/// corrupt a 24-bit ID. Derived from the PID so that concurrent invocations
-/// are unlikely to collide.
-pub fn pick_image_id() -> u32 {
-    let scrambled = std::process::id().wrapping_mul(2_654_435_761);
-    (scrambled >> 8) % 255 + 1
+/// Image IDs are global to the terminal session and shared with every other
+/// program drawing into it, and nothing hands them out: transmitting under an
+/// ID that is already in use replaces that image and drops the placements
+/// drawing it, blanking an image that may still be sitting in scrollback. The
+/// only defence is to draw at random from as much of the namespace as the
+/// placeholder cells can carry, which is [`IdSpace::Full`] straight to the
+/// terminal and [`IdSpace::MuxSafe`] through a multiplexer.
+///
+/// Any multiplexer in the stack forces the narrow space, not just the ones
+/// needing passthrough: a multiplexer re-renders the cells it stores, so its
+/// idea of what colours the outer terminal supports decides what is emitted.
+pub fn pick_image_id(mux_stack: &[Mux]) -> u32 {
+    let space = if mux_stack.is_empty() {
+        IdSpace::Full
+    } else {
+        IdSpace::MuxSafe
+    };
+    space.id_at(random_index(space.capacity()))
+}
+
+/// A random index below `bound`, seeded by the operating system.
+///
+/// `RandomState` takes its keys from the OS random source, which makes it the
+/// random number generator the standard library already ships: no extra
+/// dependency and no per-platform code. The PID and the wall clock go in as
+/// well, so two invocations still differ from each other if those keys ever
+/// stopped being random.
+fn random_index(bound: u32) -> u32 {
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        hasher.write_u128(since_epoch.as_nanos());
+    }
+    // Reduced below `bound`, so the result fits a u32 whatever `bound` is.
+    (hasher.finish() % u64::from(bound)) as u32
 }
 
 /// Write the placeholder cells that anchor a virtual placement.
@@ -207,6 +237,7 @@ pub fn display_animation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn single_chunk_format() {
@@ -454,9 +485,44 @@ mod tests {
     }
 
     #[test]
-    fn image_ids_stay_in_the_multiplexer_safe_range() {
-        let id = pick_image_id();
-        assert!((1..=255).contains(&id), "got {id}");
+    fn image_ids_under_a_multiplexer_keep_the_colour_a_multiplexer_relays() {
+        for mux in [Mux::Tmux(None), Mux::Screen(None), Mux::Zellij] {
+            for _ in 0..64 {
+                let id = pick_image_id(std::slice::from_ref(&mux));
+                assert_ne!(id, 0, "{mux:?}");
+                assert!(id & 0x00FF_FFFF <= 0xFF, "{mux:?} got {id:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn image_ids_without_a_multiplexer_span_the_full_range() {
+        // Every ID is usable, so the only invariant is that none is zero --
+        // that the wide space is actually reached is covered by the spread.
+        let ids: HashSet<u32> = (0..256).map(|_| pick_image_id(&[])).collect();
+        assert!(ids.iter().all(|&id| id != 0));
+        assert!(
+            ids.iter().any(|&id| id & 0x00FF_FFFF > 0xFF),
+            "no ID needed more than the low byte"
+        );
+    }
+
+    #[test]
+    fn image_ids_do_not_repeat_across_invocations() {
+        // 64 draws from the full space collide with probability ~5e-7, so the
+        // one-duplicate slack keeps this from ever being the flaky test.
+        let ids: HashSet<u32> = (0..64).map(|_| pick_image_id(&[])).collect();
+        assert!(ids.len() >= 63, "got {} distinct IDs of 64", ids.len());
+    }
+
+    #[test]
+    fn random_index_stays_below_its_bound() {
+        for bound in [1, 2, 255, IdSpace::MuxSafe.capacity(), u32::MAX] {
+            for _ in 0..64 {
+                let n = random_index(bound);
+                assert!(n < bound, "{n} not below {bound}");
+            }
+        }
     }
 
     #[test]

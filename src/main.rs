@@ -418,7 +418,7 @@ fn placement_for(png: &[u8], mux_stack: &[Mux], use_placeholders: bool) -> Place
     }
 
     Placement::Virtual {
-        image_id: kitty::pick_image_id(),
+        image_id: kitty::pick_image_id(mux_stack),
         cols,
         rows,
     }
