@@ -1,5 +1,11 @@
 # Changelog
 
+## upcoming
+- **Unicode placeholder placement**: images are now anchored to a grid of Unicode placeholder cells (kitty graphics `U=1`) instead of being positioned by the terminal. Placeholder cells are ordinary text, so images scroll, clip, and redraw with the surrounding output -- which is what makes them behave correctly inside multiplexers and pagers.
+- **`--placement` flag**: choose how images are anchored (`auto`, `unicode`, `direct`). `auto` uses placeholders everywhere except Konsole and iTerm2, which do not implement them.
+- **Terminal geometry detection**: the cell rectangle for a placement is sized from the terminal's cell size, resolved from `TIOCGWINSZ`, tmux's `client_cell_width`/`client_cell_height`, or an `XTWINOPS` query through the multiplexer stack, falling back to a conventional 8x16 cell. A wrong cell size only changes the image's size, never its aspect ratio.
+- **tmux passthrough warning**: kittyview now warns when tmux's `allow-passthrough` is off, instead of appearing to do nothing.
+
 ## 0.1.4
 
 - **Terminal multiplexer passthrough**: kittyview now auto-detects tmux and GNU screen via in-band terminal queries (XTVERSION, DA2) and automatically wraps kitty graphics sequences in DCS passthrough envelopes. Requires `set -g allow-passthrough on` in tmux.conf.
