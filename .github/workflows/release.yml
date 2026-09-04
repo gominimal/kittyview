@@ -124,8 +124,16 @@ jobs:
         with:
           files: kittyview-*
           generate_release_notes: true
-          # Only a v* tag publishes. A manual run lands in a draft, which is
-          # visible to collaborators only and creates no tag, so the whole job
-          # can be rehearsed without a release escaping.
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dry-run-{0}', github.run_id) }}
-          draft: ${{ github.ref_type != 'tag' }}
+          # Only a v* tag push publishes; anything else lands in a throwaway
+          # draft. Keyed on the event rather than the ref because a manual run
+          # can target a tag as well as a branch, so ref_type alone would
+          # publish -- aimed at a real tag, updating a release that shipped.
+          # Negated ("not a push") so any trigger added later drafts by default.
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('dry-run-{0}', github.run_id) }}
+          draft: ${{ github.event_name != 'push' }}
+          # target_commitish is deliberately unset. A draft does not create its
+          # tag until it is published, so a dry run leaves no dry-run-* tag to
+          # point anywhere. Aiming it at github.sha would also 404 on any
+          # branch that touches .github/workflows/ -- which is most branches
+          # that would use a dry run -- because GITHUB_TOKEN cannot be granted
+          # permission to modify workflows.
