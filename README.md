@@ -30,7 +30,7 @@ Download from [GitHub Releases](../../releases) for Linux (amd64, aarch64), macO
 
 Every release binary carries a [build provenance attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds): a Sigstore-signed record of the workflow, commit and ref that produced it. Verify one with the [GitHub CLI](https://cli.github.com):
 
-```
+```sh
 gh attestation verify kittyview-linux-amd64.tar.gz \
   --repo gominimal/kittyview \
   --source-ref refs/tags/v0.1.5 \

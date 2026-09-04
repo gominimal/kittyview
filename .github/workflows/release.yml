@@ -115,6 +115,12 @@ jobs:
           merge-multiple: true
 
       - name: Attest build provenance
+        # A manual run targeting a tag would attest that ref without being the
+        # published release, and no `gh attestation verify` policy flag can tell
+        # the two apart -- the trigger is recorded in the certificate but not
+        # assertable. So attest a real tag push, or a branch rehearsal (whose
+        # refs/heads/... ref is already distinguishable), and nothing else.
+        if: github.event_name == 'push' || github.ref_type == 'branch'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: kittyview-*
