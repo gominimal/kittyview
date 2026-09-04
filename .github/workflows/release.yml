@@ -99,9 +99,15 @@ jobs:
           path: kittyview-${{ matrix.name }}.*
 
   release:
-    # Deliberately not gated on the ref: a manual run needs to reach this job,
-    # which is the only way to exercise the publish path. What the ref decides
-    # is whether the result is published or left as a draft -- see below.
+    # Reachable by a manual run, which is the only way to exercise the publish
+    # path; the ref then decides published vs draft (see the create step). But
+    # not for a manual run targeting a tag: attesting there would name a tag
+    # this run is not publishing, and no `gh attestation verify` policy flag
+    # can tell that apart from the real thing -- the trigger is recorded in the
+    # certificate but is not assertable. Skipping the job rather than just the
+    # attestation avoids the other half of that trap: a draft with no
+    # attestation at all.
+    if: github.event_name == 'push' || github.ref_type == 'branch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -115,12 +121,6 @@ jobs:
           merge-multiple: true
 
       - name: Attest build provenance
-        # A manual run targeting a tag would attest that ref without being the
-        # published release, and no `gh attestation verify` policy flag can tell
-        # the two apart -- the trigger is recorded in the certificate but not
-        # assertable. So attest a real tag push, or a branch rehearsal (whose
-        # refs/heads/... ref is already distinguishable), and nothing else.
-        if: github.event_name == 'push' || github.ref_type == 'branch'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: kittyview-*
@@ -137,9 +137,28 @@ jobs:
           # Negated ("not a push") so any trigger added later drafts by default.
           tag_name: ${{ github.event_name == 'push' && github.ref_name || format('dry-run-{0}', github.run_id) }}
           draft: ${{ github.event_name != 'push' }}
-          # target_commitish is deliberately unset. A draft does not create its
-          # tag until it is published, so a dry run leaves no dry-run-* tag to
-          # point anywhere. Aiming it at github.sha would also 404 on any
-          # branch that touches .github/workflows/ -- which is most branches
-          # that would use a dry run -- because GITHUB_TOKEN cannot be granted
-          # permission to modify workflows.
+          # target_commitish is deliberately unset. A draft creates no tag
+          # until published, and the rehearsal draft is discarded below, so no
+          # dry-run-* tag is ever created for it to aim. Pointing it at
+          # github.sha would also 404 on any branch that touches
+          # .github/workflows/ -- most branches that would use a rehearsal --
+          # because GITHUB_TOKEN cannot be granted permission to modify
+          # workflows.
+
+      - name: Discard the rehearsal draft
+        # A rehearsal draft is publishable, and its assets are attested to a
+        # branch rather than to a release tag -- so publishing one would put out
+        # a release that `--source-ref refs/tags/...` cannot validate. Worse,
+        # publishing creates the dry-run-* tag, and with target_commitish unset
+        # that tag resolves to the default branch, not the commit that was
+        # built. Every step above has already run, so the rehearsal keeps its
+        # full coverage; only the leftover goes.
+        # always(), because a create step that fails partway can leave the
+        # draft behind -- exactly the case worth cleaning. continue-on-error so
+        # a "release not found" (nothing was created) does not mask the real
+        # failure with a confusing second one.
+        if: always() && github.event_name != 'push'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "dry-run-${{ github.run_id }}" --yes --repo "${{ github.repository }}"

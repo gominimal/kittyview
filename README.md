@@ -39,7 +39,7 @@ gh attestation verify kittyview-linux-amd64.tar.gz \
 
 Substitute the tag of the release you downloaded.
 
-`--source-ref` is the part that matters. Without it the policy only checks that *something* in this repository built the artifact, which any build from any branch satisfies -- including the draft dry runs used to rehearse the release workflow. Pinning the tag is what makes a passing check mean "this came from the release it claims to". `--deny-self-hosted-runners` additionally requires the build to have run on GitHub-hosted infrastructure.
+`--source-ref` is the part that matters. Without it the policy only checks that *something* in this repository built the artifact, which any build from any branch satisfies -- including the rehearsal runs used to exercise the release workflow, whose attestations outlive the throwaway drafts they were built for. Pinning the tag is what makes a passing check mean "this came from the release it claims to". `--deny-self-hosted-runners` additionally requires the build to have run on GitHub-hosted infrastructure.
 
 Attestations for the repository can also be browsed at [/attestations](../../attestations).
 
