@@ -26,6 +26,23 @@ Use `--force` if your terminal supports the protocol but isn't detected.
 
 Download from [GitHub Releases](../../releases) for Linux (amd64, aarch64), macOS (Intel, Apple Silicon), and Windows (amd64, aarch64). Linux binaries are statically linked.
 
+### Verifying downloads
+
+Every release binary carries a [build provenance attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds): a Sigstore-signed record of the workflow, commit and ref that produced it. Verify one with the [GitHub CLI](https://cli.github.com):
+
+```sh
+gh attestation verify kittyview-linux-amd64.tar.gz \
+  --repo gominimal/kittyview \
+  --source-ref refs/tags/v0.1.5 \
+  --deny-self-hosted-runners
+```
+
+Substitute the tag of the release you downloaded.
+
+`--source-ref` is the part that matters. Without it the policy only checks that *something* in this repository built the artifact, which any build from any branch satisfies -- including the rehearsal runs used to exercise the release workflow, whose attestations outlive the throwaway drafts they were built for. Pinning the tag is what makes a passing check mean "this came from the release it claims to". `--deny-self-hosted-runners` additionally requires the build to have run on GitHub-hosted infrastructure.
+
+Attestations for the repository can also be browsed at [/attestations](../../attestations).
+
 ### From source
 
 ```
@@ -195,6 +212,7 @@ cat diagram.svg | kittyview --svg-resources tree
 - **SVG size limits**: Oversized SVGs are automatically downscaled (max 8192x8192) to prevent memory exhaustion.
 - **Pure Rust**: No C dependencies. The entire dependency tree compiles from Rust source.
 - **Crash safety**: Kitty protocol output is fully buffered before writing to minimize partial escape sequences if the process is interrupted.
+- **Signed provenance**: release binaries carry Sigstore-signed build provenance attestations, so a download can be traced to the workflow, commit and tag that built it. See [Verifying downloads](#verifying-downloads).
 
 ## Building from source
 
