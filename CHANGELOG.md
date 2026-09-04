@@ -1,5 +1,12 @@
 # Changelog
 
+## upcoming
+
+- **Release integrity**: the release workflow now checks that the pushed tag matches `Cargo.toml`'s version before anything is built, and fails the release if it does not. The v0.1.4 release shipped binaries that reported `0.1.3`, because the version was never bumped alongside the tag.
+- Build provenance attestations are now produced by `actions/attest`, which GitHub recommends over the `actions/attest-build-provenance` wrapper it has become. Release artifacts remain verifiable with `gh attestation verify <file> --repo gominimal/kittyview`.
+- The release workflow can now be rehearsed from a manual run: the full publish path executes, but produces a draft release visible only to collaborators instead of a published one. Only a `v*` tag publishes.
+- GitHub Actions pins updated, and two version comments corrected to name the release they actually point at.
+
 ## 0.1.5
 
 - **Unicode placeholder placement**: images are now anchored to a grid of Unicode placeholder cells (kitty graphics `U=1`) instead of being positioned by the terminal. Placeholder cells are ordinary text, so images scroll, clip, and redraw with the surrounding output -- which is what makes them behave correctly inside multiplexers and pagers.
