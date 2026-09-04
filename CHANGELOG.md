@@ -4,7 +4,7 @@
 
 - **Release integrity**: the release workflow now checks that the pushed tag matches `Cargo.toml`'s version before anything is built, and fails the release if it does not. The v0.1.4 release shipped binaries that reported `0.1.3`, because the version was never bumped alongside the tag.
 - Build provenance attestations are now produced by `actions/attest`, which GitHub recommends over the `actions/attest-build-provenance` wrapper it has become. Release artifacts remain verifiable; the README now documents the command, including the `--source-ref` pin that ties a check to a specific release rather than to any build from the repository.
-- The release workflow can now be rehearsed from a manual run: the full publish path executes, but produces a draft release visible only to collaborators instead of a published one. Only a `v*` tag publishes.
+- The release workflow can now be rehearsed from a manual run: the full publish path executes, attestation included, and the draft it produces is discarded at the end of the run so nothing publishable is left behind. Only a `v*` tag publishes.
 - GitHub Actions pins updated, and two version comments corrected to name the release they actually point at.
 
 ## 0.1.5
