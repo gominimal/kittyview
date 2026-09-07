@@ -26,7 +26,7 @@ image = { version = "0.25", default-features = false, features = [
     "ff",
     "hdr",
 ] }
-resvg = "0.47"
+resvg = "0.48"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 base64 = "0.22"
