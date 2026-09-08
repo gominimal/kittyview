@@ -29,6 +29,6 @@ image = { version = "0.25", default-features = false, features = [
 resvg = "0.48"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-base64 = "0.22"
+base64 = "0.23"
 roxmltree = "0.21"
 libc = "0.2"
