@@ -13,7 +13,7 @@ use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
-use terminal::{Mux, Terminal};
+use terminal::{GraphicsProbe, Mux, Terminal, TerminalInfo};
 
 /// Parse the `--passthrough` flag value into a mux stack.
 ///
@@ -300,11 +300,8 @@ impl Target {
             PlacementMode::Unicode => true,
             PlacementMode::Direct => false,
             PlacementMode::Auto => {
-                let info = terminal::TerminalInfo {
-                    mux_stack: self.mux_stack.clone(),
-                    terminal: self.terminal.clone(),
-                };
-                info.supports_unicode_placeholders()
+                TerminalInfo::unprobed(self.mux_stack.clone(), self.terminal.clone())
+                    .supports_unicode_placeholders()
             }
         }
     }
@@ -327,50 +324,39 @@ fn check_terminal(force: bool, passthrough: &str) -> Result<Target, String> {
     let parsed = parse_passthrough(passthrough)?;
 
     // When force is set without an explicit passthrough mode, skip detection
-    // to avoid the query timeout delay.
+    // to avoid the query timeout delay. Zellij is still worth a look at the
+    // environment: it needs no passthrough wrapping, but it rejects Unicode
+    // placeholders, and `--placement auto` would otherwise anchor the image
+    // to a grid of cells Zellij draws as literal glyphs.
     if force && parsed.is_none() {
         return Ok(Target {
-            mux_stack: vec![],
+            mux_stack: terminal::zellij_from_env(),
             terminal: Terminal::Unknown,
         });
     }
 
     // Resolve the mux stack.
-    let (mux_stack, terminal) = match parsed {
+    let (mux_stack, terminal, detected) = match parsed {
         // An explicit stack skips detection, so the terminal stays unidentified.
-        Some(stack) => (stack, Terminal::Unknown),
+        Some(stack) => (stack, Terminal::Unknown, None),
         None => {
             let info = terminal::detect();
 
             if !force && !info.supports_kitty_graphics() {
-                let mut msg = format!(
-                    "Terminal ({}) does not appear to support kitty graphics protocol",
-                    info.terminal
-                );
-                if !info.mux_stack.is_empty() {
-                    let mux_desc: Vec<String> =
-                        info.mux_stack.iter().map(|m| m.to_string()).collect();
-                    msg.push_str(&format!(
-                        " (detected multiplexer{}: {})",
-                        if info.mux_stack.len() > 1 { "s" } else { "" },
-                        mux_desc.join(" > "),
-                    ));
-                    if info.mux_stack.iter().any(|m| matches!(m, Mux::Tmux(_))) {
-                        msg.push_str(
-                            "\nHint: ensure the outer terminal supports kitty graphics \
-                             and add `set -g allow-passthrough on` to your tmux.conf",
-                        );
-                    }
-                }
-                msg.push_str(" (use --force to try anyway)");
-                return Err(msg);
+                return Err(unsupported_message(&info));
             }
 
-            (info.mux_stack, info.terminal)
+            (info.mux_stack.clone(), info.terminal.clone(), Some(info))
         }
     };
 
-    warn_if_tmux_passthrough_disabled(&mux_stack);
+    // At most one warning about the image not arriving: tmux's passthrough
+    // setting is the specific diagnosis, so it wins over the general one.
+    if !warn_if_tmux_passthrough_disabled(&mux_stack) {
+        if let Some(info) = &detected {
+            warn_if_graphics_unconfirmed(info);
+        }
+    }
 
     Ok(Target {
         mux_stack,
@@ -378,24 +364,109 @@ fn check_terminal(force: bool, passthrough: &str) -> Result<Target, String> {
     })
 }
 
+/// Explain why we will not draw, as specifically as detection allows.
+///
+/// Zellij earns its own answers: a version too old to implement the protocol,
+/// a host terminal that cannot display images, and the protocol switched off
+/// in the config are three different problems with three different fixes, and
+/// none of them is "your terminal is unsupported".
+fn unsupported_message(info: &TerminalInfo) -> String {
+    if info.in_zellij() {
+        let named = match info.zellij_version() {
+            Some(v) => format!("Zellij {v}"),
+            None => "Zellij".to_string(),
+        };
+        if !terminal::zellij_implements_graphics(info.zellij_version()) {
+            return format!(
+                "{named} does not implement the kitty graphics protocol, which arrived in \
+                 Zellij 0.45.0\nHint: upgrade Zellij, or use --force to try anyway"
+            );
+        }
+        if info.graphics == GraphicsProbe::Refused {
+            return format!(
+                "{named} reports that the terminal it is running in does not support the \
+                 kitty graphics protocol\nHint: start Zellij from a terminal that does \
+                 (kitty, Ghostty, WezTerm), or use --force to try anyway"
+            );
+        }
+        return format!(
+            "{named} did not answer the kitty graphics capability query\nHint: check that \
+             `support_kitty_graphics_protocol` is not set to false in your Zellij config, \
+             or use --force to try anyway"
+        );
+    }
+
+    let mut msg = format!(
+        "Terminal ({}) does not appear to support kitty graphics protocol",
+        info.terminal
+    );
+    if !info.mux_stack.is_empty() {
+        let mux_desc: Vec<String> = info.mux_stack.iter().map(|m| m.to_string()).collect();
+        msg.push_str(&format!(
+            " (detected multiplexer{}: {})",
+            if info.mux_stack.len() > 1 { "s" } else { "" },
+            mux_desc.join(" > "),
+        ));
+        if info.mux_stack.iter().any(|m| matches!(m, Mux::Tmux(_))) {
+            msg.push_str(
+                "\nHint: ensure the outer terminal supports kitty graphics \
+                 and add `set -g allow-passthrough on` to your tmux.conf",
+            );
+        }
+    }
+    msg.push_str(" (use --force to try anyway)");
+    msg
+}
+
+/// Warn when the terminal is one that draws kitty graphics and answers for
+/// itself, but its answer did not come back through the multiplexer stack.
+///
+/// The query travels the path the image will travel, so an answer that never
+/// arrives is the one sign we get that the path is broken -- a passthrough
+/// that drops the sequence, a layer we wrapped for wrongly. The terminal's
+/// own name is reason enough to go ahead, so this is a warning, not a
+/// refusal.
+fn warn_if_graphics_unconfirmed(info: &TerminalInfo) {
+    if info.mux_stack.is_empty()
+        || !info.answers_capability_query()
+        || matches!(
+            info.graphics,
+            GraphicsProbe::Confirmed | GraphicsProbe::Skipped
+        )
+    {
+        return;
+    }
+    let mux_desc: Vec<String> = info.mux_stack.iter().map(|m| m.to_string()).collect();
+    eprintln!(
+        "Warning: {} did not answer the kitty graphics capability query through {}, \
+         so the image may not appear.",
+        info.terminal,
+        mux_desc.join(" > "),
+    );
+}
+
 /// Warn when tmux is configured to drop the escape sequences we are about to
 /// send, which would otherwise look like kittyview silently doing nothing.
-fn warn_if_tmux_passthrough_disabled(mux_stack: &[Mux]) {
+///
+/// Returns whether the warning was printed.
+fn warn_if_tmux_passthrough_disabled(mux_stack: &[Mux]) -> bool {
     if !mux_stack.iter().any(|m| matches!(m, Mux::Tmux(_))) || std::env::var_os("TMUX").is_none() {
-        return;
+        return false;
     }
     let Ok(out) = Command::new("tmux")
         .args(["show", "-gv", "allow-passthrough"])
         .output()
     else {
-        return;
+        return false;
     };
     if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "off" {
         eprintln!(
             "Warning: tmux `allow-passthrough` is off, so the image data will not reach \
              the terminal.\nAdd `set -g allow-passthrough on` to your tmux.conf."
         );
+        return true;
     }
+    false
 }
 
 /// Decide how to anchor an image of `png`'s dimensions.
@@ -539,6 +610,56 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn zellij(version: Option<&str>, graphics: GraphicsProbe) -> TerminalInfo {
+        TerminalInfo {
+            mux_stack: vec![Mux::Zellij(version.map(String::from))],
+            terminal: Terminal::Unknown,
+            graphics,
+        }
+    }
+
+    #[test]
+    fn zellij_too_old_message_names_the_release_to_upgrade_to() {
+        let msg = unsupported_message(&zellij(Some("0.44.0"), GraphicsProbe::Unanswered));
+        assert!(msg.contains("Zellij 0.44.0"));
+        assert!(msg.contains("0.45.0"));
+        assert!(msg.contains("upgrade"));
+    }
+
+    #[test]
+    fn zellij_refused_message_points_at_the_host_terminal() {
+        let msg = unsupported_message(&zellij(Some("0.45.1"), GraphicsProbe::Refused));
+        assert!(msg.contains("terminal it is running in"));
+        assert!(!msg.contains("upgrade"));
+    }
+
+    #[test]
+    fn zellij_silent_message_points_at_the_config() {
+        let msg = unsupported_message(&zellij(Some("0.45.1"), GraphicsProbe::Unanswered));
+        assert!(msg.contains("support_kitty_graphics_protocol"));
+    }
+
+    #[test]
+    fn terminals_outside_zellij_keep_the_general_message() {
+        let info = TerminalInfo::unprobed(vec![Mux::Tmux(None)], Terminal::Xterm(None));
+        let msg = unsupported_message(&info);
+        assert!(msg.contains("does not appear to support kitty graphics protocol"));
+        assert!(msg.contains("detected multiplexer: tmux"));
+        assert!(msg.contains("allow-passthrough"));
+        assert!(msg.contains("--force"));
+    }
+
+    #[test]
+    fn zellij_anchors_images_directly() {
+        // Zellij rejects `U=1`, so `auto` must not pick placeholder cells --
+        // including on the --force path, which never runs detection.
+        let target = Target {
+            mux_stack: vec![Mux::Zellij(None)],
+            terminal: Terminal::Unknown,
+        };
+        assert!(!target.use_placeholders(PlacementMode::Auto));
+    }
 
     #[test]
     fn svg_detected_by_extension() {

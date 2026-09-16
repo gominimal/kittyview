@@ -2,9 +2,14 @@
 
 //! Terminal and multiplexer detection.
 //!
-//! Identifies the terminal emulator and any multiplexer layers (tmux, screen)
-//! using in-band escape sequence queries (XTVERSION, DA2) with an environment
-//! variable fallback. Supports nested multiplexers (e.g. tmux-in-tmux).
+//! Identifies the terminal emulator and any multiplexer layers (tmux, screen,
+//! Zellij) using in-band escape sequence queries (XTVERSION, DA2) with an
+//! environment variable fallback. Supports nested multiplexers (e.g.
+//! tmux-in-tmux).
+//!
+//! Where a name does not settle whether images can be drawn, a kitty graphics
+//! capability query asks the question directly, along the same path the image
+//! will travel.
 
 use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};
@@ -33,7 +38,45 @@ pub enum Terminal {
 pub enum Mux {
     Tmux(Option<String>),
     Screen(Option<String>),
-    Zellij,
+    /// Zellij, which from 0.45.0 draws kitty graphics itself rather than
+    /// passing them through to the terminal underneath.
+    Zellij(Option<String>),
+}
+
+/// What the kitty graphics capability query came back with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsProbe {
+    /// Answered `OK`: whatever is on the other end draws kitty graphics.
+    Confirmed,
+    /// Answered with an error. Zellij replies `ENOTSUPPORTED` here when the
+    /// terminal *it* runs in cannot display images.
+    Refused,
+    /// Nothing came back, or only the barrier did.
+    Unanswered,
+    /// Never asked, because the terminal's own name already settled it.
+    Skipped,
+}
+
+/// First Zellij release implementing the kitty graphics protocol.
+const ZELLIJ_KITTY_GRAPHICS: (u32, u32, u32) = (0, 45, 0);
+
+/// Whether a Zellij version implements the kitty graphics protocol.
+///
+/// A version we could not read is given the benefit of the doubt, since the
+/// capability query has the final say either way.
+pub fn zellij_implements_graphics(version: Option<&str>) -> bool {
+    match version.and_then(semver_triple) {
+        Some(v) => v >= ZELLIJ_KITTY_GRAPHICS,
+        None => true,
+    }
+}
+
+fn semver_triple(version: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    Some((major, minor, patch))
 }
 
 /// Full terminal detection result.
@@ -44,11 +87,63 @@ pub struct TerminalInfo {
     /// directly inside and [1] is the outer one.
     pub mux_stack: Vec<Mux>,
     pub terminal: Terminal,
+    /// What the capability query answered, where one was asked.
+    pub graphics: GraphicsProbe,
 }
 
 impl TerminalInfo {
-    /// Whether the detected terminal supports the kitty graphics protocol.
+    /// A result resting on identity alone, with no capability query behind it.
+    pub fn unprobed(mux_stack: Vec<Mux>, terminal: Terminal) -> Self {
+        Self {
+            mux_stack,
+            terminal,
+            graphics: GraphicsProbe::Skipped,
+        }
+    }
+
+    /// Whether Zellij is one of the multiplexer layers.
+    pub fn in_zellij(&self) -> bool {
+        self.mux_stack.iter().any(|m| matches!(m, Mux::Zellij(_)))
+    }
+
+    /// The version Zellij reported, when we are inside one that named itself.
+    pub fn zellij_version(&self) -> Option<&str> {
+        self.mux_stack.iter().find_map(|m| match m {
+            Mux::Zellij(v) => v.as_deref(),
+            _ => None,
+        })
+    }
+
+    /// Whether this terminal is one we expect to answer the capability query,
+    /// and can therefore read silence from as a bad sign. Konsole and iTerm2
+    /// implement the protocol without necessarily answering for it.
+    pub fn answers_capability_query(&self) -> bool {
+        matches!(
+            self.terminal,
+            Terminal::Kitty(_) | Terminal::Ghostty(_) | Terminal::WezTerm(_)
+        )
+    }
+
+    /// Whether the kitty graphics protocol works here.
+    ///
+    /// A confirmed capability query settles it: whatever is on the other end
+    /// answered for itself, which is worth more than recognising a name. A
+    /// query that came back negative never overrides a name, though -- a
+    /// terminal can implement the protocol without answering for it, and a
+    /// multiplexer can swallow the reply to a query it forwarded perfectly
+    /// well.
+    ///
+    /// Zellij is the exception, and gets no benefit of the doubt: it is what
+    /// receives the escape sequences, so only it can say whether they will be
+    /// drawn. The host terminal's name -- which leaks into panes through
+    /// inherited environment variables -- answers a question nobody asked.
     pub fn supports_kitty_graphics(&self) -> bool {
+        if self.graphics == GraphicsProbe::Confirmed {
+            return true;
+        }
+        if self.in_zellij() {
+            return false;
+        }
         matches!(
             self.terminal,
             Terminal::Kitty(_)
@@ -67,6 +162,13 @@ impl TerminalInfo {
     /// `--passthrough`, and placeholders are what make images behave the same
     /// way everywhere.
     pub fn supports_unicode_placeholders(&self) -> bool {
+        // Zellij rejects a placement carrying `U=1` outright, and kittyview
+        // asks for no reply, so the rejection is silent: the placeholder cells
+        // that follow arrive as ordinary text and are drawn as literal
+        // glyphs, replacing the image with a rectangle of U+10EEEE.
+        if self.in_zellij() {
+            return false;
+        }
         !matches!(self.terminal, Terminal::Konsole(_) | Terminal::ITerm2)
     }
 
@@ -103,7 +205,7 @@ impl std::fmt::Display for Mux {
         match self {
             Mux::Tmux(v) => write!(f, "tmux{}", ver(v)),
             Mux::Screen(v) => write!(f, "screen{}", ver(v)),
-            Mux::Zellij => write!(f, "Zellij"),
+            Mux::Zellij(v) => write!(f, "Zellij{}", ver(v)),
         }
     }
 }
@@ -144,7 +246,7 @@ pub fn wrap_for_mux(data: &[u8], mux: &Mux) -> Vec<u8> {
             out.extend_from_slice(data);
             out
         }
-        Mux::Zellij => data.to_vec(),
+        Mux::Zellij(_) => data.to_vec(),
     }
 }
 
@@ -168,8 +270,20 @@ const XTVERSION: &[u8] = b"\x1b[>0q";
 /// DA2 (Secondary Device Attributes) query: `ESC [ > c`
 const DA2: &[u8] = b"\x1b[>c";
 
+/// Kitty graphics capability query: a query-only (`a=q`) transmission of a
+/// 1x1 RGB image, followed by a primary DA.
+///
+/// A terminal implementing the protocol answers `ESC _ G i=31;OK ESC \`; one
+/// that does not ignores the APC sequence entirely. That is why the DA goes
+/// out in the same write: every terminal answers it, so the negative case
+/// resolves on a reply rather than on the timeout.
+const KITTY_GRAPHICS_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+
 /// Maximum nesting depth to probe (bounds detection time).
 const MAX_MUX_DEPTH: usize = 4;
+
+/// How long to wait for a reply that arrives after the barrier.
+const LATE_REPLY_TIMEOUT: Duration = Duration::from_millis(300);
 
 // ─── Response parsers ───────────────────────────────────────
 
@@ -206,6 +320,10 @@ fn identify_xtversion(name: &str) -> (Terminal, Option<Mux>) {
         let ver = extract_version_space(name);
         return (Terminal::Unknown, Some(Mux::Tmux(ver)));
     }
+    if lower.starts_with("zellij") {
+        let version = extract_version_parens(name).and_then(|v| decode_zellij_version(&v));
+        return (Terminal::Unknown, Some(Mux::Zellij(version)));
+    }
     if lower.starts_with("kitty") {
         return (Terminal::Kitty(extract_version_parens(name)), None);
     }
@@ -229,6 +347,29 @@ fn identify_xtversion(name: &str) -> (Terminal, Option<Mux>) {
     }
 
     (Terminal::Other(name.to_string()), None)
+}
+
+/// Decode the version out of Zellij's XTVERSION reply.
+///
+/// Zellij reports the packed integer its own `version_number()` produces --
+/// two decimal digits per semver component, most significant first -- so
+/// 0.45.1 arrives as `Zellij(4501)`. A dotted version is passed through
+/// unchanged, in case a later release reports one.
+fn decode_zellij_version(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.contains('.') {
+        return Some(raw.to_string());
+    }
+    let packed: u32 = raw.parse().ok()?;
+    Some(format!(
+        "{}.{}.{}",
+        packed / 10_000,
+        (packed / 100) % 100,
+        packed % 100
+    ))
 }
 
 /// Extract version from "name(version)" format.
@@ -306,6 +447,84 @@ fn terminal_from_da2(info: &Da2Info) -> (Terminal, Option<Mux>) {
 /// Allows mocking in tests.
 trait TerminalQuerier {
     fn query(&mut self, request: &[u8], timeout: Duration) -> Option<Vec<u8>>;
+
+    /// Read again without sending anything, for the case where one query
+    /// draws two replies and the first to arrive is not the interesting one.
+    fn read_more(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Discard anything the terminal sent that we did not read, so it does
+    /// not surface as input to whatever runs next.
+    fn discard_pending(&mut self) {}
+}
+
+/// Read the verdict out of a reply to [`KITTY_GRAPHICS_QUERY`].
+///
+/// The reply is an APC sequence whose payload is `keys;status`, where the
+/// status is `OK` or an error code such as `ENOTSUPPORTED`. Anything else --
+/// the bare DA barrier, nothing at all -- means the question went unanswered.
+fn parse_graphics_probe(response: &[u8]) -> GraphicsProbe {
+    let Some(start) = response.windows(3).position(|w| w == b"\x1b_G") else {
+        return GraphicsProbe::Unanswered;
+    };
+    let payload_start = start + 3;
+    let Some(payload_end) = find_st(response, payload_start) else {
+        return GraphicsProbe::Unanswered;
+    };
+    let payload = &response[payload_start..payload_end];
+    let Some(separator) = payload.iter().position(|&b| b == b';') else {
+        return GraphicsProbe::Unanswered;
+    };
+    if payload[separator + 1..].starts_with(b"OK") {
+        GraphicsProbe::Confirmed
+    } else {
+        GraphicsProbe::Refused
+    }
+}
+
+/// Ask whether kitty graphics can be drawn, through the whole mux stack.
+fn probe_graphics(q: &mut impl TerminalQuerier, stack: &[Mux], timeout: Duration) -> GraphicsProbe {
+    let request = wrap_for_stack(KITTY_GRAPHICS_QUERY, stack);
+    let mut verdict = q
+        .query(&request, timeout)
+        .map_or(GraphicsProbe::Unanswered, |r| parse_graphics_probe(&r));
+
+    // A multiplexer can answer the DA barrier itself, out of the terminal's
+    // way and ahead of it, which ends the read before the reply we are
+    // actually waiting for has arrived. Take one more look before concluding
+    // that nothing is coming.
+    if verdict == GraphicsProbe::Unanswered && !stack.is_empty() {
+        if let Some(late) = q.read_more(LATE_REPLY_TIMEOUT) {
+            verdict = parse_graphics_probe(&late);
+        }
+    }
+
+    // Whatever of the reply we did not read -- the barrier, usually -- would
+    // otherwise land on the shell prompt after we exit.
+    q.discard_pending();
+    verdict
+}
+
+/// Run the capability query wherever its answer could change the outcome.
+///
+/// A terminal identified by name, with nothing wrapped around it, has already
+/// answered the question; asking again could only confirm what we know or
+/// return a negative we would not act on. Everywhere else -- inside Zellij,
+/// under a multiplexer whose passthrough may or may not deliver, in front of
+/// a terminal we cannot name -- the query travels the exact path the image
+/// will travel, and tests what no name can.
+fn probe_if_inconclusive(
+    q: &mut impl TerminalQuerier,
+    stack: &[Mux],
+    terminal: &Terminal,
+    timeout: Duration,
+) -> GraphicsProbe {
+    let settled = TerminalInfo::unprobed(vec![], terminal.clone());
+    if stack.is_empty() && settled.supports_kitty_graphics() {
+        return GraphicsProbe::Skipped;
+    }
+    probe_graphics(q, stack, timeout)
 }
 
 /// Identify what's at the current layer: send XTVERSION, fall back to DA2.
@@ -342,42 +561,62 @@ fn detect_inband(q: &mut impl TerminalQuerier) -> TerminalInfo {
         return TerminalInfo {
             mux_stack: vec![],
             terminal: Terminal::Unknown,
+            graphics: probe_graphics(q, &[], timeout),
         };
     };
 
     let Some(first_mux) = mux else {
         // Direct terminal, no mux
+        let graphics = probe_if_inconclusive(q, &[], &terminal, timeout);
         return TerminalInfo {
             mux_stack: vec![],
             terminal,
+            graphics,
         };
     };
 
     // We're inside at least one mux. Probe outward recursively.
     let mut stack = vec![first_mux];
-    probe_outer(q, &mut stack, passthrough_timeout);
+    if !ends_at_zellij(&stack) {
+        probe_outer(q, &mut stack, passthrough_timeout);
+    }
 
-    // Query through the full discovered stack to identify the outer terminal.
-    let xt = wrap_for_stack(XTVERSION, &stack);
-    let da = wrap_for_stack(DA2, &stack);
-    let terminal = if let Some((term, mux)) = identify_layer(q, &xt, &da, passthrough_timeout) {
-        if let Some(outer_mux) = mux {
-            // Even more nesting beyond what probe_outer found.
-            if stack.len() < MAX_MUX_DEPTH {
-                stack.push(outer_mux);
-            }
-            Terminal::Unknown
-        } else {
-            term
-        }
-    } else {
+    // Zellij answers escape-sequence queries itself instead of forwarding
+    // them, so there is nothing outside it to discover: it is the terminal we
+    // are drawing into, whatever it is running in.
+    let terminal = if ends_at_zellij(&stack) {
         Terminal::Unknown
+    } else {
+        // Query through the full discovered stack to identify the outer terminal.
+        let xt = wrap_for_stack(XTVERSION, &stack);
+        let da = wrap_for_stack(DA2, &stack);
+        if let Some((term, mux)) = identify_layer(q, &xt, &da, passthrough_timeout) {
+            if let Some(outer_mux) = mux {
+                // Even more nesting beyond what probe_outer found.
+                if stack.len() < MAX_MUX_DEPTH {
+                    stack.push(outer_mux);
+                }
+                Terminal::Unknown
+            } else {
+                term
+            }
+        } else {
+            Terminal::Unknown
+        }
     };
 
+    let graphics = probe_if_inconclusive(q, &stack, &terminal, passthrough_timeout);
     TerminalInfo {
         mux_stack: stack,
         terminal,
+        graphics,
     }
+}
+
+/// Whether the outermost layer found so far is Zellij, which is as far out as
+/// escape-sequence queries reach.
+fn ends_at_zellij(stack: &[Mux]) -> bool {
+    matches!(stack.last(), Some(Mux::Zellij(_)))
 }
 
 /// Recursively probe through mux layers to discover nesting.
@@ -393,7 +632,12 @@ fn probe_outer(q: &mut impl TerminalQuerier, stack: &mut Vec<Mux>, timeout: Dura
         };
 
         match mux {
-            Some(next_mux) => stack.push(next_mux),
+            Some(next_mux) => {
+                stack.push(next_mux);
+                if ends_at_zellij(stack) {
+                    break; // Zellij answers for itself — nothing beyond it
+                }
+            }
             None => break, // Found a terminal, not a mux — done
         }
     }
@@ -403,11 +647,19 @@ fn probe_outer(q: &mut impl TerminalQuerier, stack: &mut Vec<Mux>, timeout: Dura
 
 /// Detect terminal and mux from environment variables alone.
 pub fn detect_from_env() -> TerminalInfo {
-    let mux_stack = detect_mux_env();
-    let terminal = detect_terminal_env();
-    TerminalInfo {
-        mux_stack,
-        terminal,
+    TerminalInfo::unprobed(detect_mux_env(), detect_terminal_env())
+}
+
+/// The Zellij layer, if the environment says we are inside one.
+///
+/// For the paths that skip detection: Zellij needs no passthrough wrapping,
+/// but it does reject Unicode placeholders, so knowing it is there still
+/// decides how the image is anchored.
+pub fn zellij_from_env() -> Vec<Mux> {
+    if std::env::var_os("ZELLIJ").is_some() {
+        vec![Mux::Zellij(None)]
+    } else {
+        vec![]
     }
 }
 
@@ -420,7 +672,7 @@ fn detect_mux_env() -> Vec<Mux> {
         return vec![Mux::Screen(None)];
     }
     if std::env::var_os("ZELLIJ").is_some() {
-        return vec![Mux::Zellij];
+        return vec![Mux::Zellij(None)];
     }
     vec![]
 }
@@ -527,7 +779,7 @@ pub(crate) mod tty {
         }
 
         /// Drain any pending bytes from the read fd.
-        fn drain(&self) {
+        fn discard_pending(&self) {
             let mut byte = [0u8];
             loop {
                 if !poll_fd(self.read_fd, Duration::ZERO).unwrap_or(false) {
@@ -580,12 +832,20 @@ pub(crate) mod tty {
 
     impl TerminalQuerier for QuerySession {
         fn query(&mut self, request: &[u8], timeout: Duration) -> Option<Vec<u8>> {
-            self.drain();
+            self.discard_pending();
             let ret = unsafe { libc::write(self.write_fd, request.as_ptr().cast(), request.len()) };
             if ret < 0 {
                 return None;
             }
             self.read_response(timeout)
+        }
+
+        fn read_more(&mut self, timeout: Duration) -> Option<Vec<u8>> {
+            self.read_response(timeout)
+        }
+
+        fn discard_pending(&mut self) {
+            QuerySession::discard_pending(self);
         }
     }
 
@@ -640,6 +900,7 @@ pub(crate) mod tty {
                         } else {
                             info.terminal
                         },
+                        graphics: info.graphics,
                     }
                 } else if info.mux_stack.is_empty() {
                     // In-band found terminal but no mux — check env for mux
@@ -647,6 +908,7 @@ pub(crate) mod tty {
                     TerminalInfo {
                         mux_stack: env_mux,
                         terminal: info.terminal,
+                        graphics: info.graphics,
                     }
                 } else {
                     info
@@ -674,9 +936,10 @@ fn is_response_complete(buf: &[u8]) -> bool {
         return true;
     }
 
-    // DA2 response: ESC [ > ... c
-    if buf[len - 1] == b'c' && len >= 6 {
-        return buf.windows(3).any(|w| w == b"\x1b[>");
+    // Device attributes: DA2 (ESC [ > ... c), or the DA1 report (ESC [ ? ... c)
+    // that serves as the barrier on the capability query.
+    if buf[len - 1] == b'c' && len >= 4 {
+        return buf.windows(3).any(|w| w == b"\x1b[>" || w == b"\x1b[?");
     }
 
     // XTWINOPS report: ESC [ Ps ; Ps ; Ps t
@@ -937,7 +1200,7 @@ mod tests {
     #[test]
     fn wrap_for_mux_zellij_transparent() {
         let data = b"\x1b[>0q";
-        let wrapped = wrap_for_mux(data, &Mux::Zellij);
+        let wrapped = wrap_for_mux(data, &Mux::Zellij(None));
         assert_eq!(wrapped, data);
     }
 
@@ -1110,55 +1373,290 @@ mod tests {
 
     #[test]
     fn kitty_supports_graphics() {
-        let info = TerminalInfo {
-            mux_stack: vec![],
-            terminal: Terminal::Kitty(None),
-        };
+        let info = TerminalInfo::unprobed(vec![], Terminal::Kitty(None));
         assert!(info.supports_kitty_graphics());
     }
 
     #[test]
     fn unknown_does_not_support_graphics() {
-        let info = TerminalInfo {
-            mux_stack: vec![],
-            terminal: Terminal::Unknown,
-        };
+        let info = TerminalInfo::unprobed(vec![], Terminal::Unknown);
         assert!(!info.supports_kitty_graphics());
     }
 
     #[test]
     fn tmux_needs_passthrough() {
-        let info = TerminalInfo {
-            mux_stack: vec![Mux::Tmux(None)],
-            terminal: Terminal::Kitty(None),
-        };
+        let info = TerminalInfo::unprobed(vec![Mux::Tmux(None)], Terminal::Kitty(None));
         assert!(info.needs_passthrough());
     }
 
     #[test]
     fn nested_tmux_needs_passthrough() {
-        let info = TerminalInfo {
-            mux_stack: vec![Mux::Tmux(None), Mux::Tmux(None)],
-            terminal: Terminal::Kitty(None),
-        };
+        let info = TerminalInfo::unprobed(
+            vec![Mux::Tmux(None), Mux::Tmux(None)],
+            Terminal::Kitty(None),
+        );
         assert!(info.needs_passthrough());
     }
 
     #[test]
     fn zellij_does_not_need_passthrough() {
-        let info = TerminalInfo {
-            mux_stack: vec![Mux::Zellij],
-            terminal: Terminal::Kitty(None),
-        };
+        let info = TerminalInfo::unprobed(vec![Mux::Zellij(None)], Terminal::Kitty(None));
         assert!(!info.needs_passthrough());
     }
 
     #[test]
     fn no_mux_does_not_need_passthrough() {
-        let info = TerminalInfo {
-            mux_stack: vec![],
-            terminal: Terminal::Kitty(None),
-        };
+        let info = TerminalInfo::unprobed(vec![], Terminal::Kitty(None));
         assert!(!info.needs_passthrough());
+    }
+
+    // ── Zellij identity ─────────────────────────────────────
+
+    #[test]
+    fn xtversion_zellij() {
+        // Zellij packs its version into an integer: 0.45.1 -> 4501.
+        let resp = b"\x1bP>|Zellij(4501)\x1b\\";
+        let (term, mux) = parse_xtversion(resp).unwrap();
+        assert_eq!(term, Terminal::Unknown);
+        assert_eq!(mux, Some(Mux::Zellij(Some("0.45.1".into()))));
+    }
+
+    #[test]
+    fn zellij_version_decoding() {
+        assert_eq!(decode_zellij_version("4501").as_deref(), Some("0.45.1"));
+        assert_eq!(decode_zellij_version("4500").as_deref(), Some("0.45.0"));
+        assert_eq!(decode_zellij_version("4400").as_deref(), Some("0.44.0"));
+        assert_eq!(decode_zellij_version("10203").as_deref(), Some("1.2.3"));
+        // A dotted version, should a later release report one, is left alone.
+        assert_eq!(decode_zellij_version("0.46.0").as_deref(), Some("0.46.0"));
+        assert_eq!(decode_zellij_version(""), None);
+        assert_eq!(decode_zellij_version("not-a-version"), None);
+    }
+
+    #[test]
+    fn zellij_graphics_version_threshold() {
+        assert!(!zellij_implements_graphics(Some("0.44.0")));
+        assert!(!zellij_implements_graphics(Some("0.42.2")));
+        assert!(zellij_implements_graphics(Some("0.45.0")));
+        assert!(zellij_implements_graphics(Some("0.45.1")));
+        assert!(zellij_implements_graphics(Some("1.0.0")));
+        // An unreadable version defers to the capability query.
+        assert!(zellij_implements_graphics(None));
+    }
+
+    #[test]
+    fn zellij_rejects_unicode_placeholders() {
+        let info =
+            TerminalInfo::unprobed(vec![Mux::Zellij(Some("0.45.1".into()))], Terminal::Unknown);
+        assert!(!info.supports_unicode_placeholders());
+    }
+
+    #[test]
+    fn zellij_needs_a_confirmed_query_not_an_inherited_env_var() {
+        // TERM_PROGRAM and friends leak into Zellij panes, so the host
+        // terminal's name can survive into detection. It does not mean the
+        // Zellij in between will draw anything.
+        let named = TerminalInfo::unprobed(
+            vec![Mux::Zellij(Some("0.45.1".into()))],
+            Terminal::Ghostty(None),
+        );
+        assert!(!named.supports_kitty_graphics());
+
+        let confirmed = TerminalInfo {
+            mux_stack: vec![Mux::Zellij(Some("0.45.1".into()))],
+            terminal: Terminal::Unknown,
+            graphics: GraphicsProbe::Confirmed,
+        };
+        assert!(confirmed.supports_kitty_graphics());
+    }
+
+    #[test]
+    fn refused_query_does_not_override_a_named_terminal() {
+        // Under a multiplexer the reply can go missing on a path that
+        // nonetheless carries the image, and not every terminal answers.
+        let info = TerminalInfo {
+            mux_stack: vec![Mux::Tmux(None)],
+            terminal: Terminal::Kitty(None),
+            graphics: GraphicsProbe::Unanswered,
+        };
+        assert!(info.supports_kitty_graphics());
+    }
+
+    // ── Capability query ────────────────────────────────────
+
+    #[test]
+    fn graphics_probe_ok() {
+        assert_eq!(
+            parse_graphics_probe(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;52c"),
+            GraphicsProbe::Confirmed
+        );
+    }
+
+    #[test]
+    fn graphics_probe_enotsupported() {
+        let resp = b"\x1b_Gi=31;ENOTSUPPORTED:kitty graphics not supported by host terminal\x1b\\";
+        assert_eq!(parse_graphics_probe(resp), GraphicsProbe::Refused);
+    }
+
+    #[test]
+    fn graphics_probe_barrier_only() {
+        assert_eq!(
+            parse_graphics_probe(b"\x1b[?62;52c"),
+            GraphicsProbe::Unanswered
+        );
+        assert_eq!(parse_graphics_probe(b""), GraphicsProbe::Unanswered);
+        assert_eq!(
+            parse_graphics_probe(b"\x1b_Gi=31;OK"),
+            GraphicsProbe::Unanswered
+        );
+    }
+
+    #[test]
+    fn response_complete_da1() {
+        assert!(is_response_complete(b"\x1b[?62;4;52c"));
+        assert!(!is_response_complete(b"\x1b[?62;4"));
+    }
+
+    // ── Detection through Zellij ────────────────────────────
+
+    #[test]
+    fn detect_zellij_answers_for_itself() {
+        let mut q = MockQuerier::new(vec![
+            (
+                XTVERSION.to_vec(),
+                Some(b"\x1bP>|Zellij(4501)\x1b\\".to_vec()),
+            ),
+            (
+                KITTY_GRAPHICS_QUERY.to_vec(),
+                Some(b"\x1b_Gi=31;OK\x1b\\".to_vec()),
+            ),
+        ]);
+        let info = detect_inband(&mut q);
+        // One layer only: Zellij answers queries itself, so probing outward
+        // would just hear from Zellij again.
+        assert_eq!(info.mux_stack, vec![Mux::Zellij(Some("0.45.1".into()))]);
+        assert_eq!(info.terminal, Terminal::Unknown);
+        assert_eq!(info.graphics, GraphicsProbe::Confirmed);
+        assert!(info.supports_kitty_graphics());
+        assert!(!info.supports_unicode_placeholders());
+        assert!(!info.needs_passthrough());
+    }
+
+    #[test]
+    fn detect_zellij_whose_host_cannot_draw() {
+        let mut q =
+            MockQuerier::new(vec![
+            (XTVERSION.to_vec(), Some(b"\x1bP>|Zellij(4501)\x1b\\".to_vec())),
+            (
+                KITTY_GRAPHICS_QUERY.to_vec(),
+                Some(
+                    b"\x1b_Gi=31;ENOTSUPPORTED:kitty graphics not supported by host terminal\x1b\\"
+                        .to_vec(),
+                ),
+            ),
+        ]);
+        let info = detect_inband(&mut q);
+        assert_eq!(info.graphics, GraphicsProbe::Refused);
+        assert!(!info.supports_kitty_graphics());
+    }
+
+    #[test]
+    fn detect_zellij_too_old_for_graphics() {
+        let mut q = MockQuerier::new(vec![(
+            XTVERSION.to_vec(),
+            Some(b"\x1bP>|Zellij(4400)\x1b\\".to_vec()),
+        )]);
+        let info = detect_inband(&mut q);
+        assert_eq!(info.zellij_version(), Some("0.44.0"));
+        assert!(!zellij_implements_graphics(info.zellij_version()));
+        assert_eq!(info.graphics, GraphicsProbe::Unanswered);
+        assert!(!info.supports_kitty_graphics());
+    }
+
+    #[test]
+    fn detect_zellij_inside_tmux() {
+        let xt_tmux = wrap_for_stack(XTVERSION, &[Mux::Tmux(None)]);
+        let probe = wrap_for_stack(
+            KITTY_GRAPHICS_QUERY,
+            &[Mux::Tmux(None), Mux::Zellij(Some("0.45.1".into()))],
+        );
+        let mut q = MockQuerier::new(vec![
+            (XTVERSION.to_vec(), Some(b"\x1bP>|tmux 3.4\x1b\\".to_vec())),
+            (xt_tmux, Some(b"\x1bP>|Zellij(4501)\x1b\\".to_vec())),
+            (probe, Some(b"\x1b_Gi=31;OK\x1b\\".to_vec())),
+        ]);
+        let info = detect_inband(&mut q);
+        assert_eq!(info.mux_stack.len(), 2);
+        assert!(matches!(info.mux_stack[0], Mux::Tmux(_)));
+        assert!(matches!(info.mux_stack[1], Mux::Zellij(_)));
+        assert_eq!(info.terminal, Terminal::Unknown);
+        assert_eq!(info.graphics, GraphicsProbe::Confirmed);
+    }
+
+    // ── When the query is asked at all ──────────────────────
+
+    #[test]
+    fn named_terminal_is_not_asked_to_confirm_itself() {
+        let mut q = MockQuerier::new(vec![(
+            XTVERSION.to_vec(),
+            Some(b"\x1bP>|kitty(0.35.0)\x1b\\".to_vec()),
+        )]);
+        let info = detect_inband(&mut q);
+        assert_eq!(info.graphics, GraphicsProbe::Skipped);
+        assert!(info.supports_kitty_graphics());
+    }
+
+    #[test]
+    fn unnamed_terminal_can_still_confirm_itself() {
+        let mut q = MockQuerier::new(vec![
+            (
+                XTVERSION.to_vec(),
+                Some(b"\x1bP>|SomeFutureTerminal 2.0\x1b\\".to_vec()),
+            ),
+            (
+                KITTY_GRAPHICS_QUERY.to_vec(),
+                Some(b"\x1b_Gi=31;OK\x1b\\".to_vec()),
+            ),
+        ]);
+        let info = detect_inband(&mut q);
+        assert!(matches!(info.terminal, Terminal::Other(_)));
+        assert_eq!(info.graphics, GraphicsProbe::Confirmed);
+        assert!(info.supports_kitty_graphics());
+    }
+
+    #[test]
+    fn silent_terminal_can_still_confirm_itself() {
+        let mut q = MockQuerier::new(vec![
+            (XTVERSION.to_vec(), None),
+            (DA2.to_vec(), None),
+            (
+                KITTY_GRAPHICS_QUERY.to_vec(),
+                Some(b"\x1b_Gi=31;OK\x1b\\".to_vec()),
+            ),
+        ]);
+        let info = detect_inband(&mut q);
+        assert_eq!(info.terminal, Terminal::Unknown);
+        assert!(info.supports_kitty_graphics());
+    }
+
+    #[test]
+    fn late_reply_after_a_locally_answered_barrier() {
+        // screen answers the DA barrier itself, ahead of the reply it
+        // forwarded, which ends the read before the answer arrives.
+        struct LateReplyQuerier;
+        impl TerminalQuerier for LateReplyQuerier {
+            fn query(&mut self, request: &[u8], _timeout: Duration) -> Option<Vec<u8>> {
+                if request == XTVERSION {
+                    return Some(b"\x1bP>|Zellij(4501)\x1b\\".to_vec());
+                }
+                Some(b"\x1b[?1;2c".to_vec())
+            }
+            fn read_more(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+                Some(b"\x1b_Gi=31;OK\x1b\\".to_vec())
+            }
+        }
+        let mut q = LateReplyQuerier;
+        let info = detect_inband(&mut q);
+        assert_eq!(info.graphics, GraphicsProbe::Confirmed);
     }
 }
