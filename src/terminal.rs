@@ -285,6 +285,9 @@ const MAX_MUX_DEPTH: usize = 4;
 /// How long to wait for a reply that arrives after the barrier.
 const LATE_REPLY_TIMEOUT: Duration = Duration::from_millis(300);
 
+/// How long to wait for the barrier that arrives after the reply.
+const BARRIER_DRAIN_GRACE: Duration = Duration::from_millis(50);
+
 // ─── Response parsers ───────────────────────────────────────
 
 /// Parsed DA2 response parameters.
@@ -494,14 +497,23 @@ fn probe_graphics(q: &mut impl TerminalQuerier, stack: &[Mux], timeout: Duration
     // way and ahead of it, which ends the read before the reply we are
     // actually waiting for has arrived. Take one more look before concluding
     // that nothing is coming.
+    let mut barrier_seen = false;
     if verdict == GraphicsProbe::Unanswered && !stack.is_empty() {
+        // The read we just ended stopped on that locally-answered barrier.
+        barrier_seen = true;
         if let Some(late) = q.read_more(LATE_REPLY_TIMEOUT) {
             verdict = parse_graphics_probe(&late);
         }
     }
 
     // Whatever of the reply we did not read -- the barrier, usually -- would
-    // otherwise land on the shell prompt after we exit.
+    // otherwise land on the shell prompt after we exit. When the APC reply
+    // arrived first the barrier is still in flight, and the zero-timeout
+    // drain below would look for it too early to find it, so wait briefly.
+    let answered = matches!(verdict, GraphicsProbe::Confirmed | GraphicsProbe::Refused);
+    if answered && !barrier_seen {
+        let _ = q.read_more(BARRIER_DRAIN_GRACE);
+    }
     q.discard_pending();
     verdict
 }
@@ -1643,7 +1655,10 @@ mod tests {
     fn late_reply_after_a_locally_answered_barrier() {
         // screen answers the DA barrier itself, ahead of the reply it
         // forwarded, which ends the read before the answer arrives.
-        struct LateReplyQuerier;
+        #[derive(Default)]
+        struct LateReplyQuerier {
+            reads: usize,
+        }
         impl TerminalQuerier for LateReplyQuerier {
             fn query(&mut self, request: &[u8], _timeout: Duration) -> Option<Vec<u8>> {
                 if request == XTVERSION {
@@ -1652,11 +1667,45 @@ mod tests {
                 Some(b"\x1b[?1;2c".to_vec())
             }
             fn read_more(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+                self.reads += 1;
                 Some(b"\x1b_Gi=31;OK\x1b\\".to_vec())
             }
         }
-        let mut q = LateReplyQuerier;
+        let mut q = LateReplyQuerier::default();
         let info = detect_inband(&mut q);
         assert_eq!(info.graphics, GraphicsProbe::Confirmed);
+        // The barrier ended the first read, so there is nothing left to wait
+        // for; the drain grace is not spent a second time.
+        assert_eq!(q.reads, 1);
+    }
+
+    #[test]
+    fn the_barrier_is_drained_before_the_prompt_gets_it() {
+        // The terminal answers the query before the barrier it was sent
+        // with, so the read ends at the APC and the barrier is still in
+        // flight. Waiting for it is what keeps it off the shell prompt.
+        #[derive(Default)]
+        struct SlowBarrierQuerier {
+            drained: bool,
+        }
+        impl TerminalQuerier for SlowBarrierQuerier {
+            fn query(&mut self, request: &[u8], _timeout: Duration) -> Option<Vec<u8>> {
+                if request == KITTY_GRAPHICS_QUERY {
+                    return Some(b"\x1b_Gi=31;OK\x1b\\".to_vec());
+                }
+                None
+            }
+            fn read_more(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+                self.drained = true;
+                Some(b"\x1b[?1;2c".to_vec())
+            }
+        }
+        let mut q = SlowBarrierQuerier::default();
+        let verdict = probe_graphics(&mut q, &[], Duration::from_millis(10));
+        assert_eq!(verdict, GraphicsProbe::Confirmed);
+        assert!(
+            q.drained,
+            "the trailing DA1 barrier was left for the prompt"
+        );
     }
 }
