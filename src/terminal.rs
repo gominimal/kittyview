@@ -79,7 +79,20 @@ fn semver_triple(version: &str) -> Option<(u32, u32, u32)> {
     let mut parts = version.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let patch = match parts.next() {
+        // A missing patch is zero: 0.45 means 0.45.0.
+        None => 0,
+        // A suffixed patch (1.3.1-HEAD) counts by its numeric prefix. One
+        // with no digits at all (1.3.nightly) leaves the whole version
+        // unread, and both callers give an unread version the benefit of
+        // the doubt.
+        Some(part) => {
+            let end = part
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(part.len());
+            part[..end].parse().ok()?
+        }
+    };
     Some((major, minor, patch))
 }
 
@@ -1518,13 +1531,17 @@ mod tests {
 
     #[test]
     fn ghostty_animation_versions_with_suffixes() {
-        // Dev and rc builds carry suffixes the patch component cannot parse;
-        // major.minor still decide.
+        // A suffixed patch counts by its numeric prefix.
         let rc = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("1.4.0-rc1".into())));
         assert!(rc.supports_animation());
         let old = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("1.3.1-HEAD+abc".into())));
         assert!(!old.supports_animation());
-        // A version that does not parse at all is not positive knowledge.
+        // A patch with no digits marks a dev build, whose version says
+        // nothing about what has been merged; the version goes unread and
+        // unread is not positive knowledge. Likewise one that does not
+        // parse at all.
+        let nightly = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("1.3.nightly".into())));
+        assert!(nightly.supports_animation());
         let junk = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("nightly".into())));
         assert!(junk.supports_animation());
     }
@@ -1586,8 +1603,10 @@ mod tests {
         assert!(zellij_implements_graphics(Some("0.45.0")));
         assert!(zellij_implements_graphics(Some("0.45.1")));
         assert!(zellij_implements_graphics(Some("1.0.0")));
-        // An unreadable version defers to the capability query.
+        // An unreadable version defers to the capability query -- including
+        // one whose patch component carries no digits to read.
         assert!(zellij_implements_graphics(None));
+        assert!(zellij_implements_graphics(Some("0.44.nightly")));
     }
 
     #[test]
