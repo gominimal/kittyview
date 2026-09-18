@@ -60,7 +60,7 @@ impl Placement {
 
 /// Write a single APC sequence to the output buffer, wrapped for the mux stack.
 fn write_apc(buf: &mut Vec<u8>, apc: &[u8], mux_stack: &[Mux]) {
-    if mux_stack.is_empty() || mux_stack.iter().all(|m| matches!(m, Mux::Zellij)) {
+    if mux_stack.is_empty() || mux_stack.iter().all(|m| matches!(m, Mux::Zellij(_))) {
         buf.extend_from_slice(apc);
     } else {
         buf.extend_from_slice(&wrap_for_stack(apc, mux_stack));
@@ -381,7 +381,7 @@ mod tests {
     fn zellij_no_wrapping() {
         let data = b"tiny";
         let mut out = Vec::new();
-        let stack = [Mux::Zellij];
+        let stack = [Mux::Zellij(None)];
         display_png(data, &mut out, &stack, Placement::Direct).unwrap();
         assert!(!out.starts_with(b"\x1bP"));
         assert!(out.starts_with(b"\x1b_G"));
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn image_ids_under_a_multiplexer_keep_the_colour_a_multiplexer_relays() {
-        for mux in [Mux::Tmux(None), Mux::Screen(None), Mux::Zellij] {
+        for mux in [Mux::Tmux(None), Mux::Screen(None), Mux::Zellij(None)] {
             for _ in 0..64 {
                 let id = pick_image_id(std::slice::from_ref(&mux));
                 assert_ne!(id, 0, "{mux:?}");

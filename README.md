@@ -18,6 +18,8 @@ kittyview auto-detects support with in-band terminal queries, falling back to en
 - [Konsole](https://konsole.kde.org/)
 - [iTerm2](https://iterm2.com/)
 
+Terminals kittyview cannot identify by name are asked directly, using the graphics protocol's own capability query, so a terminal that implements the protocol generally works without `--force`.
+
 Use `--force` if your terminal supports the protocol but isn't detected.
 
 ## Install
@@ -95,6 +97,17 @@ set -g allow-passthrough on
 
 kittyview warns when it detects that this setting is off, since the symptom is otherwise an image that simply never appears.
 
+#### Zellij
+
+Zellij implements the kitty graphics protocol itself from version 0.45.0, drawing the images rather than passing the sequences through, so no passthrough wrapping is involved. kittyview detects Zellij and its version, and asks Zellij directly whether an image can be drawn -- `--force` is not needed.
+
+Two things follow from Zellij drawing the images itself:
+
+- Images are placed directly under Zellij, whatever `--placement auto` would otherwise choose. Zellij does not implement Unicode placeholder cells and rejects placements that use them, so a placeholder grid would appear as literal glyphs instead of an image. `--placement unicode` still overrides this, but has nothing to draw with.
+- Zellij only draws images when the terminal *it* runs in supports the protocol, and when `support_kitty_graphics_protocol` has not been set to `false` in its config. kittyview reports either case instead of emitting sequences nothing will draw.
+
+Zellij before 0.45.0 does not implement the protocol at all. kittyview says so and names the version it found.
+
 Detection can be overridden with `--passthrough`:
 
 ```
@@ -118,7 +131,7 @@ Images can be anchored to the screen two ways, selected with `--placement`:
 
 With `direct` placement the terminal owns the image's position, so it stays pinned where it was first drawn while the text around it scrolls away. Unicode placeholders occupy ordinary text cells, so the image scrolls, clips, and redraws with the surrounding output -- which is what makes images behave correctly under multiplexers and pagers.
 
-`auto` uses placeholders everywhere except Konsole and iTerm2, which do not implement them.
+`auto` uses placeholders everywhere except Konsole, iTerm2, and Zellij, which do not implement them.
 
 ### Convert to PNG
 
