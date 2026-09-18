@@ -469,6 +469,47 @@ fn warn_if_tmux_passthrough_disabled(mux_stack: &[Mux]) -> bool {
     false
 }
 
+/// Warn when a multi-frame animation is headed somewhere it positively will
+/// not play. Every animation sequence goes out with replies suppressed
+/// (`q=2`), so without this the terminal's refusal is a static first frame
+/// with no explanation.
+///
+/// Deliberately independent of `check_terminal`'s at-most-one-warning rule:
+/// that rule collapses two diagnoses of one symptom (the image never
+/// arriving), while this is a different symptom (the image arriving and not
+/// moving), and both can be true at once.
+///
+/// On the `--force` path the terminal is Unknown and gets the benefit of
+/// the doubt, but the Zellij environment check that decides placement also
+/// reaches here, so `--animate --force` in a Zellij pane still warns.
+fn warn_if_animation_unsupported(target: &Target) {
+    let info = TerminalInfo::unprobed(target.mux_stack.clone(), target.terminal.clone());
+    if let Some(warning) = animation_warning(&info) {
+        eprintln!("Warning: {warning}");
+    }
+}
+
+/// The animation warning this target has earned, if any.
+///
+/// Zellij is named ahead of the terminal: it intercepts the animation
+/// sequences whatever runs underneath it, and the terminal's name may only
+/// be an environment variable that leaked into the pane.
+fn animation_warning(info: &TerminalInfo) -> Option<String> {
+    if info.supports_animation() {
+        return None;
+    }
+    let refuser = info
+        .mux_stack
+        .iter()
+        .find(|m| matches!(m, Mux::Zellij(_)))
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| info.terminal.to_string());
+    Some(format!(
+        "{refuser} does not support the kitty animation protocol, so only the \
+         first frame will be shown."
+    ))
+}
+
 /// Decide how to anchor an image of `png`'s dimensions.
 ///
 /// Falls back to direct placement when the image rectangle cannot be worked
@@ -539,6 +580,9 @@ fn run() -> Result<(), String> {
             } else {
                 vec![(logo::generate_logo_png(), 0)]
             };
+            if frames.len() > 1 {
+                warn_if_animation_unsupported(&target);
+            }
             let mut stdout = io::stdout().lock();
             display_sized_frames(&frames, &mut stdout, &target, cli.placement)?;
             writeln!(stdout).map_err(|e| format!("Failed to write: {e}"))?;
@@ -587,6 +631,10 @@ fn run() -> Result<(), String> {
                 };
                 vec![(png, 0)]
             };
+
+            if frames.len() > 1 {
+                warn_if_animation_unsupported(&target);
+            }
 
             let mut stdout = io::stdout().lock();
             display_sized_frames(&frames, &mut stdout, &target, cli.placement)?;
@@ -648,6 +696,33 @@ mod tests {
         assert!(msg.contains("detected multiplexer: tmux"));
         assert!(msg.contains("allow-passthrough"));
         assert!(msg.contains("--force"));
+    }
+
+    #[test]
+    fn animation_warning_names_zellij_over_a_leaked_terminal() {
+        let info = TerminalInfo::unprobed(
+            vec![Mux::Zellij(Some("0.45.1".into()))],
+            Terminal::Ghostty(Some("1.3.1".into())),
+        );
+        let msg = animation_warning(&info).unwrap();
+        assert!(msg.contains("Zellij 0.45.1"));
+        assert!(!msg.contains("Ghostty"));
+    }
+
+    #[test]
+    fn animation_warning_names_the_refusing_terminal() {
+        let info = TerminalInfo::unprobed(vec![], Terminal::ITerm2);
+        let msg = animation_warning(&info).unwrap();
+        assert!(msg.contains("iTerm2"));
+        assert!(msg.contains("first frame"));
+    }
+
+    #[test]
+    fn no_animation_warning_where_animation_plays() {
+        let kitty = TerminalInfo::unprobed(vec![], Terminal::Kitty(None));
+        assert!(animation_warning(&kitty).is_none());
+        let wezterm = TerminalInfo::unprobed(vec![], Terminal::WezTerm(None));
+        assert!(animation_warning(&wezterm).is_none());
     }
 
     #[test]
