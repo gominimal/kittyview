@@ -60,6 +60,10 @@ pub enum GraphicsProbe {
 /// First Zellij release implementing the kitty graphics protocol.
 const ZELLIJ_KITTY_GRAPHICS: (u32, u32, u32) = (0, 45, 0);
 
+/// First Ghostty release implementing kitty animation. Every release before
+/// it answers the animation actions with "ERROR: unimplemented action".
+const GHOSTTY_KITTY_ANIMATION: (u32, u32, u32) = (1, 4, 0);
+
 /// Whether a Zellij version implements the kitty graphics protocol.
 ///
 /// A version we could not read is given the benefit of the doubt, since the
@@ -75,7 +79,20 @@ fn semver_triple(version: &str) -> Option<(u32, u32, u32)> {
     let mut parts = version.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let patch = match parts.next() {
+        // A missing patch is zero: 0.45 means 0.45.0.
+        None => 0,
+        // A suffixed patch (1.3.1-HEAD) counts by its numeric prefix. One
+        // with no digits at all (1.3.nightly) leaves the whole version
+        // unread, and both callers give an unread version the benefit of
+        // the doubt.
+        Some(part) => {
+            let end = part
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(part.len());
+            part[..end].parse().ok()?
+        }
+    };
     Some((major, minor, patch))
 }
 
@@ -170,6 +187,40 @@ impl TerminalInfo {
             return false;
         }
         !matches!(self.terminal, Terminal::Konsole(_) | Terminal::ITerm2)
+    }
+
+    /// Whether the kitty animation protocol (`a=f` frames, `a=a` control)
+    /// will play here.
+    ///
+    /// The protocol has no capability query for animation, so unlike
+    /// graphics this rests on names alone: false only where an
+    /// implementation is positively known not to animate, with unrecognised
+    /// terminals -- and unreadable versions -- given the benefit of the
+    /// doubt. The graphics probe has no say, because confirming graphics
+    /// says nothing about animation.
+    ///
+    /// The known refusals, each read from the implementation's own source:
+    /// Zellij rejects `a=f` and `a=a` with ENOTSUPPORTED whatever terminal
+    /// it runs in, so any Zellij layer settles it; Konsole's parser
+    /// dispatches only on `a=t/T/q/p/d`, so the animation actions fall
+    /// through silently; iTerm2 parses them into handlers that are TODO
+    /// stubs (through 3.7.2); Ghostty answers them with "ERROR:
+    /// unimplemented action" until animation lands in 1.4.0. WezTerm is
+    /// deliberately absent: it plays `a=f` frame data through its
+    /// animated-image path and ignores only the `a=a` control, so
+    /// animations do move there.
+    pub fn supports_animation(&self) -> bool {
+        if self.in_zellij() {
+            return false;
+        }
+        match &self.terminal {
+            Terminal::Konsole(_) | Terminal::ITerm2 => false,
+            Terminal::Ghostty(version) => match version.as_deref().and_then(semver_triple) {
+                Some(v) => v >= GHOSTTY_KITTY_ANIMATION,
+                None => true,
+            },
+            _ => true,
+        }
     }
 
     /// Whether output needs DCS passthrough wrapping.
@@ -1396,6 +1447,106 @@ mod tests {
     }
 
     #[test]
+    fn kitty_supports_animation() {
+        let info = TerminalInfo::unprobed(vec![], Terminal::Kitty(None));
+        assert!(info.supports_animation());
+    }
+
+    #[test]
+    fn animation_refusals_are_known_by_name() {
+        for terminal in [
+            Terminal::Konsole(Some("24.12.3".into())),
+            Terminal::Konsole(None),
+            Terminal::ITerm2,
+            Terminal::Ghostty(Some("1.3.1".into())),
+            Terminal::Ghostty(Some("1.0.0".into())),
+        ] {
+            let info = TerminalInfo::unprobed(vec![], terminal);
+            assert!(!info.supports_animation(), "{}", info.terminal);
+        }
+    }
+
+    #[test]
+    fn ghostty_animates_from_1_4_0() {
+        let from = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("1.4.0".into())));
+        assert!(from.supports_animation());
+        // An unreadable version is not positive knowledge, so no warning.
+        let unversioned = TerminalInfo::unprobed(vec![], Terminal::Ghostty(None));
+        assert!(unversioned.supports_animation());
+    }
+
+    #[test]
+    fn wezterm_plays_animation_frames() {
+        // WezTerm ignores only the `a=a` control; transmitted frames play.
+        let info = TerminalInfo::unprobed(vec![], Terminal::WezTerm(None));
+        assert!(info.supports_animation());
+    }
+
+    #[test]
+    fn unrecognised_terminals_get_the_benefit_of_the_animation_doubt() {
+        assert!(TerminalInfo::unprobed(vec![], Terminal::Unknown).supports_animation());
+        assert!(
+            TerminalInfo::unprobed(vec![], Terminal::Other("SomeFutureTerminal".into()))
+                .supports_animation()
+        );
+    }
+
+    #[test]
+    fn zellij_never_animates_even_with_graphics_confirmed() {
+        // A confirmed graphics probe says nothing about animation: Zellij
+        // answers OK to `a=q` yet rejects `a=f` and `a=a`.
+        let info = TerminalInfo {
+            mux_stack: vec![Mux::Zellij(Some("0.45.1".into()))],
+            terminal: Terminal::Unknown,
+            graphics: GraphicsProbe::Confirmed,
+        };
+        assert!(info.supports_kitty_graphics());
+        assert!(!info.supports_animation());
+    }
+
+    #[test]
+    fn kitty_under_tmux_still_animates() {
+        let info = TerminalInfo::unprobed(vec![Mux::Tmux(None)], Terminal::Kitty(None));
+        assert!(info.supports_animation());
+    }
+
+    #[test]
+    fn zellij_blocks_animation_whatever_name_leaked_through() {
+        // TERM_PROGRAM leaks into Zellij panes, so the host terminal's name
+        // can survive detection; Zellij still intercepts the animation.
+        let info = TerminalInfo::unprobed(
+            vec![Mux::Zellij(Some("0.45.1".into()))],
+            Terminal::Kitty(None),
+        );
+        assert!(!info.supports_animation());
+    }
+
+    #[test]
+    fn zellij_anywhere_in_the_stack_blocks_animation() {
+        // tmux running inside a Zellij pane (innermost first).
+        let info =
+            TerminalInfo::unprobed(vec![Mux::Tmux(None), Mux::Zellij(None)], Terminal::Unknown);
+        assert!(!info.supports_animation());
+    }
+
+    #[test]
+    fn ghostty_animation_versions_with_suffixes() {
+        // A suffixed patch counts by its numeric prefix.
+        let rc = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("1.4.0-rc1".into())));
+        assert!(rc.supports_animation());
+        let old = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("1.3.1-HEAD+abc".into())));
+        assert!(!old.supports_animation());
+        // A patch with no digits marks a dev build, whose version says
+        // nothing about what has been merged; the version goes unread and
+        // unread is not positive knowledge. Likewise one that does not
+        // parse at all.
+        let nightly = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("1.3.nightly".into())));
+        assert!(nightly.supports_animation());
+        let junk = TerminalInfo::unprobed(vec![], Terminal::Ghostty(Some("nightly".into())));
+        assert!(junk.supports_animation());
+    }
+
+    #[test]
     fn tmux_needs_passthrough() {
         let info = TerminalInfo::unprobed(vec![Mux::Tmux(None)], Terminal::Kitty(None));
         assert!(info.needs_passthrough());
@@ -1452,8 +1603,10 @@ mod tests {
         assert!(zellij_implements_graphics(Some("0.45.0")));
         assert!(zellij_implements_graphics(Some("0.45.1")));
         assert!(zellij_implements_graphics(Some("1.0.0")));
-        // An unreadable version defers to the capability query.
+        // An unreadable version defers to the capability query -- including
+        // one whose patch component carries no digits to read.
         assert!(zellij_implements_graphics(None));
+        assert!(zellij_implements_graphics(Some("0.44.nightly")));
     }
 
     #[test]

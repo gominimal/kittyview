@@ -82,7 +82,7 @@ kittyview --animate nyan.gif
 kittyview --animate logo
 ```
 
-Animation support requires a terminal with kitty animation protocol support (currently kitty; Ghostty and others may show only the first frame).
+Animation needs the kitty *animation* protocol, which is separate from kitty graphics support and much rarer. kitty plays animations, and WezTerm plays the transmitted frames (it ignores only the animation-control sequence, so the first frame's delay may be off). Konsole and iTerm2 ignore the animation sequences entirely, Ghostty rejects them before 1.4.0, and Zellij rejects them whatever terminal it runs in -- each of these shows only a static first frame. The protocol offers no capability query for animation, so kittyview warns where it positively knows the animation will not play, and gives terminals it does not recognise the benefit of the doubt.
 
 ### Terminal multiplexers
 
