@@ -797,6 +797,13 @@ mod unix {
         use_placeholders: bool,
         mut load: impl FnMut(&Path) -> Result<Frames, String>,
     ) -> Result<(), String> {
+        // Refuse an empty list before touching the terminal: the CLI never
+        // sends one, but this is a public library function, and indexing
+        // slide zero of nothing would be a panic inside raw mode.
+        if paths.is_empty() {
+            return Err("slideshow needs at least one image file".to_string());
+        }
+
         // Geometry first: it can run escape-sequence queries, which need
         // the terminal to themselves before the slideshow owns it.
         let geom = geometry::detect(mux_stack);
@@ -1128,6 +1135,15 @@ mod tests {
         }
         cache.retain_near(0);
         assert_eq!(cache.len(), 2, "slides 0 and 1 remain");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_path_list_is_an_error_not_a_panic() {
+        // The guard sits before any terminal interaction, so this runs
+        // headless. The loader must never be called.
+        let result = run(&[], &[], true, |_| unreachable!("no paths, no loads"));
+        assert!(result.is_err());
     }
 
     // ── screen sequences ────────────────────────────────────
