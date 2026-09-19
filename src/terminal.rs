@@ -778,6 +778,7 @@ fn detect_terminal_env() -> Terminal {
 pub(crate) mod tty {
     use super::*;
     use std::os::unix::io::{AsRawFd, RawFd};
+    use std::sync::Mutex;
 
     /// RAII guard that restores termios settings on drop.
     struct RawModeGuard {
@@ -845,7 +846,7 @@ pub(crate) mod tty {
         fn discard_pending(&self) {
             let mut byte = [0u8];
             loop {
-                if !poll_fd(self.read_fd, Duration::ZERO).unwrap_or(false) {
+                if !wait_readable(self.read_fd, Duration::ZERO).unwrap_or(false) {
                     break;
                 }
                 let ret = unsafe { libc::read(self.read_fd, byte.as_mut_ptr().cast(), 1) };
@@ -865,7 +866,7 @@ pub(crate) mod tty {
                 if remaining.is_zero() {
                     break;
                 }
-                if !poll_fd(self.read_fd, remaining).unwrap_or(false) {
+                if !wait_readable(self.read_fd, remaining).unwrap_or(false) {
                     break;
                 }
                 let mut byte = [0u8];
@@ -891,6 +892,132 @@ pub(crate) mod tty {
         pub fn ask(&mut self, request: &[u8], timeout: Duration) -> Option<Vec<u8>> {
             <Self as TerminalQuerier>::query(self, request, timeout)
         }
+    }
+
+    // The raw-mode session doubles as the slideshow's channel to the
+    // terminal: same fds, same raw-mode guard, plus single-byte reads for
+    // keys and buffered writes for drawing.
+    impl QuerySession {
+        /// Read one byte, waiting at most `timeout`.
+        ///
+        /// Returns `None` on timeout -- and on an interrupted wait, so a
+        /// signal hands control back to the caller's event loop.
+        pub fn read_byte(&mut self, timeout: Duration) -> Option<u8> {
+            if !wait_readable(self.read_fd, timeout).unwrap_or(false) {
+                return None;
+            }
+            let mut byte = [0u8];
+            let ret = unsafe { libc::read(self.read_fd, byte.as_mut_ptr().cast(), 1) };
+            if ret == 1 { Some(byte[0]) } else { None }
+        }
+
+        /// Write all of `data` to the terminal.
+        ///
+        /// Interrupted writes are resumed: a signal mid-frame must not leave
+        /// half an escape sequence on the wire, and the event loop sees the
+        /// signal's flag as soon as the write completes.
+        pub fn write_bytes(&mut self, data: &[u8]) -> io::Result<()> {
+            let mut rest = data;
+            while !rest.is_empty() {
+                let ret = unsafe { libc::write(self.write_fd, rest.as_ptr().cast(), rest.len()) };
+                if ret < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(err);
+                }
+                rest = &rest[ret as usize..];
+            }
+            Ok(())
+        }
+
+        /// Put the terminal back into the mode it was in before this session.
+        ///
+        /// Idempotent, and also run by the guard on drop; explicit calls let
+        /// the slideshow restore in a known order (escape sequences first,
+        /// then termios) and before suspending itself.
+        pub fn restore_termios(&self) {
+            unsafe {
+                libc::tcsetattr(self._guard.fd, libc::TCSANOW, &self._guard.original);
+            }
+        }
+
+        /// Re-enter raw mode after [`restore_termios`](Self::restore_termios),
+        /// e.g. when resuming from a suspend.
+        pub fn reenter_raw(&self) -> io::Result<()> {
+            let mut raw = self._guard.original;
+            unsafe { libc::cfmakeraw(&mut raw) };
+            if unsafe { libc::tcsetattr(self._guard.fd, libc::TCSANOW, &raw) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+
+        /// Register this session with the emergency restore used by the
+        /// panic hook: `sequence` is written to the terminal after termios
+        /// is restored. Re-arm after every draw so the sequence deletes the
+        /// image currently on screen.
+        pub fn arm_emergency_restore(&self, sequence: Vec<u8>) {
+            let state = EmergencyRestore {
+                termios_fd: self._guard.fd,
+                original: self._guard.original,
+                out_fd: self.write_fd,
+                sequence,
+            };
+            *lock_emergency() = Some(state);
+        }
+    }
+
+    // ─── Emergency restore ──────────────────────────────────
+
+    /// Everything needed to put the terminal back without a live session:
+    /// the panic hook runs after the stack that owned the session has begun
+    /// unwinding, so the state has to live somewhere `'static`.
+    struct EmergencyRestore {
+        termios_fd: RawFd,
+        original: libc::termios,
+        out_fd: RawFd,
+        sequence: Vec<u8>,
+    }
+
+    static EMERGENCY: Mutex<Option<EmergencyRestore>> = Mutex::new(None);
+
+    fn lock_emergency() -> std::sync::MutexGuard<'static, Option<EmergencyRestore>> {
+        // A poisoned lock means a panic elsewhere; restoring the terminal
+        // is exactly what should still happen.
+        EMERGENCY.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Forget the armed restore state; the owner is cleaning up itself.
+    pub fn disarm_emergency_restore() {
+        *lock_emergency() = None;
+    }
+
+    /// Run the armed restore, if any: termios first (cheap, cannot block),
+    /// then the escape sequences that leave the alternate screen, so a
+    /// panic message lands readable on the main screen. Consumes the state,
+    /// so hook and normal cleanup cannot both restore.
+    pub fn run_emergency_restore() -> bool {
+        let Some(state) = lock_emergency().take() else {
+            return false;
+        };
+        unsafe {
+            libc::tcsetattr(state.termios_fd, libc::TCSANOW, &state.original);
+        }
+        let mut rest = state.sequence.as_slice();
+        while !rest.is_empty() {
+            let ret = unsafe { libc::write(state.out_fd, rest.as_ptr().cast(), rest.len()) };
+            if ret <= 0 {
+                let interrupted = io::Error::last_os_error().kind() == io::ErrorKind::Interrupted;
+                if ret < 0 && interrupted {
+                    continue;
+                }
+                break;
+            }
+            rest = &rest[ret as usize..];
+        }
+        true
     }
 
     impl TerminalQuerier for QuerySession {
@@ -925,14 +1052,45 @@ pub(crate) mod tty {
         Ok(RawModeGuard { fd, original })
     }
 
-    fn poll_fd(fd: RawFd, timeout: Duration) -> io::Result<bool> {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
+    /// Wait until `fd` is readable or the timeout passes.
+    ///
+    /// This is select(2), not poll(2), because macOS poll does not support
+    /// devices -- its own manual page says so under BUGS. A poll on the
+    /// `/dev/tty` character device there returns immediately with POLLNVAL,
+    /// which reads as "never readable": every query would silently time out
+    /// whenever stdin is a pipe, and the replies the terminal still sends
+    /// would land unread on the shell prompt. select has a separate, working
+    /// kernel path for `/dev/tty`, and is how fzf, less and kitty's own
+    /// tools wait on it. An interrupted wait reports "nothing readable"
+    /// rather than an error, so a signal returns control to the caller.
+    pub(crate) fn wait_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+        // FD_SET on an fd at or above FD_SETSIZE is a buffer overflow, not
+        // an error return. Terminal fds are small; refuse the rest.
+        if fd < 0 || fd as usize >= libc::FD_SETSIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fd out of range for select",
+            ));
+        }
+        let mut readfds = unsafe { std::mem::zeroed::<libc::fd_set>() };
+        unsafe {
+            libc::FD_ZERO(&mut readfds);
+            libc::FD_SET(fd, &mut readfds);
+        }
+        // Timeouts here are seconds at most; clamp far below any time_t.
+        let mut tv = libc::timeval {
+            tv_sec: timeout.as_secs().min(i32::MAX as u64) as libc::time_t,
+            tv_usec: libc::suseconds_t::from(timeout.subsec_micros() as i32),
         };
-        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        let ret = unsafe {
+            libc::select(
+                fd + 1,
+                &mut readfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
         if ret < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
@@ -940,7 +1098,7 @@ pub(crate) mod tty {
             }
             return Err(err);
         }
-        Ok(ret > 0 && (pfd.revents & libc::POLLIN) != 0)
+        Ok(ret > 0 && unsafe { libc::FD_ISSET(fd, &readfds) })
     }
 
     /// Detect using in-band queries, falling back to env vars.
@@ -1860,5 +2018,73 @@ mod tests {
             q.drained,
             "the trailing DA1 barrier was left for the prompt"
         );
+    }
+
+    // ── wait_readable (select) ──────────────────────────────
+
+    #[cfg(unix)]
+    mod wait_readable {
+        use super::super::tty::wait_readable;
+        use std::time::Duration;
+
+        /// A pipe whose ends are closed on drop.
+        struct Pipe {
+            read: libc::c_int,
+            write: libc::c_int,
+        }
+
+        impl Pipe {
+            fn new() -> Self {
+                let mut fds = [0 as libc::c_int; 2];
+                assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+                Self {
+                    read: fds[0],
+                    write: fds[1],
+                }
+            }
+        }
+
+        impl Drop for Pipe {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::close(self.read);
+                    libc::close(self.write);
+                }
+            }
+        }
+
+        #[test]
+        fn pending_bytes_report_ready() {
+            let pipe = Pipe::new();
+            assert_eq!(
+                unsafe { libc::write(pipe.write, b"x".as_ptr().cast(), 1) },
+                1
+            );
+            assert!(wait_readable(pipe.read, Duration::from_secs(1)).unwrap());
+        }
+
+        #[test]
+        fn an_empty_fd_times_out() {
+            let pipe = Pipe::new();
+            assert!(!wait_readable(pipe.read, Duration::from_millis(10)).unwrap());
+        }
+
+        #[test]
+        fn a_zero_timeout_is_a_non_blocking_check() {
+            let pipe = Pipe::new();
+            assert!(!wait_readable(pipe.read, Duration::ZERO).unwrap());
+            assert_eq!(
+                unsafe { libc::write(pipe.write, b"x".as_ptr().cast(), 1) },
+                1
+            );
+            assert!(wait_readable(pipe.read, Duration::ZERO).unwrap());
+        }
+
+        #[test]
+        fn fds_beyond_fd_setsize_are_refused_not_overflowed() {
+            let fd = libc::FD_SETSIZE as libc::c_int;
+            assert!(wait_readable(fd, Duration::ZERO).is_err());
+            assert!(wait_readable(-1, Duration::ZERO).is_err());
+        }
     }
 }

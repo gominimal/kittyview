@@ -230,6 +230,51 @@ pub fn image_cells(px_w: u32, px_h: u32, geom: &Geometry, max_cells: u16) -> (u1
     (cols as u16, rows as u16)
 }
 
+/// The cell rectangle an image should occupy on a screen it must fit.
+///
+/// [`image_cells`] deliberately lets tall images run past the window, since
+/// scrolling output can scroll. A slideshow on the alternate screen cannot,
+/// so this additionally caps the height at `avail_rows`, preserving the
+/// aspect ratio the same way the width cap does.
+pub fn image_cells_within(
+    px_w: u32,
+    px_h: u32,
+    geom: &Geometry,
+    max_cells: u16,
+    avail_rows: u16,
+) -> (u16, u16) {
+    let (cols, rows) = image_cells(px_w, px_h, geom, max_cells);
+    if cols == 0 || rows == 0 {
+        return (cols, rows);
+    }
+    let limit = f64::from(avail_rows.max(1).min(max_cells));
+    let (cols, rows) = (f64::from(cols), f64::from(rows));
+    if rows <= limit {
+        return (cols as u16, rows as u16);
+    }
+    let scaled_cols = (cols * limit / rows).round().max(1.0);
+    (scaled_cols as u16, limit as u16)
+}
+
+/// Re-read the window size in cells, keeping the cell size already measured.
+///
+/// For resize handling: `TIOCGWINSZ` is a cheap ioctl, while re-measuring
+/// the cell size can mean escape-sequence queries -- which would race with
+/// key input when something else owns the terminal. A cell size that was
+/// right a moment ago is still right after a window resize; only a font
+/// change invalidates it, and a wrong cell size only missizes the image,
+/// never distorts it.
+pub fn refresh_window_size(geom: &Geometry) -> Geometry {
+    match platform::winsize() {
+        Some((cols, rows, _, _)) if cols > 0 && rows > 0 => Geometry {
+            cols,
+            rows,
+            ..*geom
+        },
+        _ => *geom,
+    }
+}
+
 /// Read `width` and `height` from a PNG's IHDR chunk.
 pub fn png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -363,6 +408,44 @@ mod tests {
         // Taller than the window is fine -- it scrolls, like any long output.
         let (cols, rows) = image_cells(80, 3200, &g, 297);
         assert_eq!((cols, rows), (10, 200));
+    }
+
+    #[test]
+    fn fitting_caps_tall_images_to_the_available_rows() {
+        let g = geom(80, 24, 8, 16);
+        // 80x3200 px is 10x200 cells naturally; in 23 rows it keeps its
+        // aspect ratio: 10 * 23/200 rounds to 1 column.
+        assert_eq!(image_cells_within(80, 3200, &g, 297, 23), (1, 23));
+    }
+
+    #[test]
+    fn fitting_leaves_images_that_already_fit_alone() {
+        let g = geom(80, 24, 8, 16);
+        assert_eq!(image_cells_within(160, 160, &g, 297, 23), (20, 10));
+    }
+
+    #[test]
+    fn fitting_caps_both_dimensions_of_a_huge_image() {
+        let g = geom(80, 24, 8, 16);
+        // 1600x1600 px is 200x100 cells naturally: first fitted to 80
+        // columns (80x40), then to 23 rows (46x23).
+        assert_eq!(image_cells_within(1600, 1600, &g, 297, 23), (46, 23));
+    }
+
+    #[test]
+    fn fitting_never_returns_zero_for_a_real_image() {
+        let g = geom(80, 24, 8, 16);
+        let (cols, rows) = image_cells_within(1, 10_000, &g, 297, 23);
+        assert!(cols >= 1 && rows >= 1);
+        assert_eq!(image_cells_within(0, 100, &g, 297, 23), (0, 0));
+    }
+
+    #[test]
+    fn fitting_survives_a_degenerate_row_budget() {
+        let g = geom(80, 24, 8, 16);
+        let (cols, rows) = image_cells_within(1600, 1600, &g, 297, 0);
+        assert_eq!(rows, 1, "a zero budget still leaves one row to draw in");
+        assert!(cols >= 1);
     }
 
     #[test]

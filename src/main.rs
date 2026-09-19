@@ -45,15 +45,18 @@ fn parse_passthrough(s: &str) -> Result<Option<Vec<Mux>>, String> {
 #[command(
     name = "kittyview",
     version,
-    about = "Display images in kitty-compatible terminals"
+    about = "Display images in kitty-compatible terminals",
+    after_help = "More than one file opens an interactive slideshow: \
+                  Right/Down/Space/n next, Left/Up/Backspace/p previous, \
+                  Home/End first/last, r redraw, q/Esc quit."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Image file to display
+    /// Image files to display (more than one opens a slideshow)
     #[arg(value_hint = ValueHint::FilePath)]
-    file: Option<PathBuf>,
+    files: Vec<PathBuf>,
 
     /// Force output even if terminal support is not detected
     #[arg(long, global = true)]
@@ -563,6 +566,42 @@ fn display_sized_frames(
     display_frames(frames, out, &target.mux_stack, placement)
 }
 
+/// Run the interactive slideshow over the CLI's file list.
+///
+/// Decoding stays here, next to the single-image loaders it reuses; the
+/// slideshow module gets a closure and never learns about SVG policies or
+/// stdin.
+#[cfg(unix)]
+fn run_slideshow(cli: &Cli) -> Result<(), String> {
+    let target = check_terminal(cli.force, &cli.passthrough)?;
+    if cli.animate {
+        warn_if_animation_unsupported(&target);
+    }
+    let use_placeholders = target.use_placeholders(cli.placement);
+    let animate = cli.animate;
+    let svg_resources = cli.svg_resources;
+    kittyview::slideshow::run(&cli.files, &target.mux_stack, use_placeholders, |path| {
+        if animate {
+            load_animated_image(path, svg_resources)
+        } else {
+            load_image_as_png(path, svg_resources).map(|png| vec![(png, 0)])
+        }
+    })
+}
+
+/// No Windows terminal renders kitty graphics from a local process, and raw
+/// key input there is a separate platform layer; say so instead of leaving
+/// escape sequences on the console.
+#[cfg(not(unix))]
+fn run_slideshow(_cli: &Cli) -> Result<(), String> {
+    Err(
+        "slideshow mode is not supported on Windows yet: no native Windows terminal \
+         displays kitty graphics from a local process. Display one image at a time, \
+         or run kittyview inside WSL."
+            .to_string(),
+    )
+}
+
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
@@ -605,19 +644,23 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         None => {
+            if cli.files.len() > 1 {
+                return run_slideshow(&cli);
+            }
+
             let target = check_terminal(cli.force, &cli.passthrough)?;
 
             let frames = if cli.animate {
-                match cli.file {
-                    Some(path) => load_animated_image(&path, cli.svg_resources)?,
+                match cli.files.first() {
+                    Some(path) => load_animated_image(path, cli.svg_resources)?,
                     None if !io::stdin().is_terminal() => load_animated_stdin(cli.svg_resources)?,
                     None => {
                         return Err("No image file specified. Use --help for usage.".to_string());
                     }
                 }
             } else {
-                let png = match cli.file {
-                    Some(path) => load_image_as_png(&path, cli.svg_resources)?,
+                let png = match cli.files.first() {
+                    Some(path) => load_image_as_png(path, cli.svg_resources)?,
                     None if !io::stdin().is_terminal() => load_stdin_as_png(cli.svg_resources)?,
                     None => {
                         return Err("No image file specified. Use --help for usage.".to_string());
@@ -728,6 +771,26 @@ mod tests {
             terminal: Terminal::Unknown,
         };
         assert!(!target.use_placeholders(PlacementMode::Auto));
+    }
+
+    #[test]
+    fn multiple_files_parse_for_the_slideshow() {
+        let cli = Cli::try_parse_from(["kittyview", "a.png", "b.png", "c.png"]).unwrap();
+        assert_eq!(cli.files.len(), 3);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn a_single_file_still_parses_alone() {
+        let cli = Cli::try_parse_from(["kittyview", "a.png"]).unwrap();
+        assert_eq!(cli.files.len(), 1);
+    }
+
+    #[test]
+    fn subcommands_still_win_over_file_arguments() {
+        let cli = Cli::try_parse_from(["kittyview", "logo"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Logo)));
+        assert!(cli.files.is_empty());
     }
 
     #[test]
