@@ -11,6 +11,9 @@
 - Build provenance attestations are now produced by `actions/attest`, which GitHub recommends over the `actions/attest-build-provenance` wrapper it has become. Release artifacts remain verifiable; the README now documents the command, including the `--source-ref` pin that ties a check to a specific release rather than to any build from the repository.
 - The release workflow can now be rehearsed from a manual run: the full publish path executes, attestation included, and the draft it produces is discarded at the end of the run so nothing publishable is left behind. Only a `v*` tag publishes.
 - GitHub Actions pins updated, and two version comments corrected to name the release they actually point at.
+- **Fuzzing**: cargo-fuzz targets now cover the two hand-written parsers that face untrusted input -- the SVG `<foreignObject>` preprocessor and the PNG IHDR reader. A weekly workflow runs them, uploads any crash reproducer, and files an issue on failure, since scheduled-run notifications otherwise reach only whoever last edited the cron line. To let the fuzz targets link against the internals, the binary's modules moved into a library crate; the CLI is unchanged, and the library is not a stable API.
+- **CodeQL**: Rust static analysis now runs on pushes, pull requests, and a weekly schedule.
+- **Provenance on the release page**: each release now carries its Sigstore provenance bundle (`kittyview-provenance.intoto.jsonl`) as an asset, so artifacts can be verified without querying GitHub's attestation store -- including fully offline, with a saved trusted root; SECURITY.md documents both commands. The release workflow also declares its empty top-level token permissions explicitly instead of leaving them implied.
 
 ## 0.1.5
 
