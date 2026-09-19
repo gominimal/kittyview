@@ -66,9 +66,33 @@ dot -Tsvg graph.dot | kittyview
 
 # Display the built-in logo
 kittyview logo
+
+# Browse several images as a slideshow
+kittyview vacation/*.jpg
 ```
 
 When no file is given and stdin is piped, kittyview reads from stdin automatically. Format is detected from file contents (magic bytes for raster images, `<svg` for SVGs).
+
+### Slideshow
+
+Giving kittyview more than one file opens an interactive slideshow on the terminal's alternate screen: each image is shown fitted to the window and centred, with a status line naming the file and its position in the list.
+
+| Key                              | Action                        |
+|----------------------------------|-------------------------------|
+| Right, Down, Space, `n`          | next image                    |
+| Left, Up, Backspace, `p`         | previous image                |
+| Home / End (also PgUp / PgDn)    | first / last image            |
+| `r`                              | redraw the slide from scratch |
+| Ctrl-Z                           | suspend (resume with `fg`)    |
+| `q`, Esc, Ctrl-C                 | quit                          |
+
+Navigation stops at the ends of the list rather than wrapping. Files that fail to load show their error in place and are skipped past with the same keys. `--animate` plays animated slides on terminals that support the kitty animation protocol.
+
+Under tmux, each slide change redraws by way of the pane's main screen -- a brief flash of the pane beneath, and `r` forces the same rebuild by hand. The flash buys reliability twice over: tmux silently drops passthrough sequences around pane redraws (kittyview also verifies each transmission's arrival over the protocol's reply channel, retries losses, and reports them in a diagnostics line on exit), and Ghostty releases through 1.3.1 render placeholder images delivered as in-place pane updates blank -- confirmed with the data verified present in the terminal -- while a full repaint renders them correctly. The same Ghostty releases can also render large placeholder images at the wrong size inside tmux (clipped or narrowed, [ghostty#13056](https://github.com/ghostty-org/ghostty/issues/13056)). Ghostty's nightly builds fix the rendering; kitty is unaffected.
+
+The slideshow leaves the terminal exactly as it found it, on every exit path: quitting, errors, panics, and fatal signals all restore the screen, the cursor, and the terminal mode, and delete the transmitted images so the terminal's image memory is returned. `kill -9` is the one exit nothing can clean up after -- `reset` recovers the terminal if it comes to that. Ctrl-Z suspends and resumes like any well-behaved fullscreen program.
+
+Two caveats: inside GNU screen the alternate screen is off unless `altscreen on` is set in `.screenrc`, so the slideshow draws on the main screen and its final frame stays in scrollback on exit; and slideshow mode is not available on Windows, where no native terminal currently displays kitty graphics from a local process (WSL works).
 
 ### Animated images
 

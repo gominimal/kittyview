@@ -24,3 +24,17 @@ path = "fuzz_targets/png_dimensions.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "terminal_replies"
+path = "fuzz_targets/terminal_replies.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "slideshow_keys"
+path = "fuzz_targets/slideshow_keys.rs"
+test = false
+doc = false
+bench = false

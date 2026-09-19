@@ -8,5 +8,6 @@ pub mod geometry;
 pub mod kitty;
 pub mod logo;
 pub mod placeholder;
+pub mod slideshow;
 pub mod svg;
 pub mod terminal;
