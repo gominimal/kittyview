@@ -35,7 +35,7 @@ Every release binary carries a [build provenance attestation](https://docs.githu
 ```sh
 gh attestation verify kittyview-linux-amd64.tar.gz \
   --repo gominimal/kittyview \
-  --source-ref refs/tags/v0.1.5 \
+  --source-ref refs/tags/v0.1.6 \
   --deny-self-hosted-runners
 ```
 
