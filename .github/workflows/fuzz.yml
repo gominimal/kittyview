@@ -27,7 +27,9 @@ jobs:
           # cargo-fuzz needs -Z flags for sanitizer instrumentation.
           toolchain: nightly
 
-      - run: cargo install cargo-fuzz --locked
+      # Pinned so a broken cargo-fuzz release cannot take out the weekly run;
+      # bump deliberately.
+      - run: cargo install cargo-fuzz --locked --version 0.13.2
 
       - name: Fuzz each target
         run: |
