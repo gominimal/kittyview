@@ -197,6 +197,55 @@ pub fn transmit_virtual(
     out.write_all(&buf)
 }
 
+/// Transmit an animation and create its virtual placement, without the
+/// placeholder grid; the caller positions the grid rows itself.
+///
+/// The [`transmit_virtual`] reasoning extends to whole animations: the base
+/// frame, the extra frames (`a=f`), and the loop start (`a=a`) all address
+/// the image, and nothing becomes visible until placeholder cells reference
+/// the placement -- so the entire sequence can go out while the previous
+/// slide is still on screen.
+pub fn transmit_animation_virtual(
+    frames: &[(Vec<u8>, u32)],
+    out: &mut impl Write,
+    mux_stack: &[Mux],
+    image_id: u32,
+    placement_id: u32,
+    cols: u16,
+    rows: u16,
+) -> io::Result<()> {
+    let Some((base, first_delay)) = frames.first() else {
+        return Ok(());
+    };
+    if frames.len() == 1 {
+        return transmit_virtual(base, out, mux_stack, image_id, placement_id, cols, rows);
+    }
+
+    let mut buf = Vec::new();
+    write_frame_data(
+        &mut buf,
+        base,
+        &format!("a=T,f=100,i={image_id},U=1,c={cols},r={rows},p={placement_id},q=2"),
+        mux_stack,
+    )?;
+    for (i, (png_data, delay_ms)) in frames.iter().enumerate().skip(1) {
+        let r = i + 1;
+        write_frame_data(
+            &mut buf,
+            png_data,
+            &format!("a=f,i={image_id},r={r},z={delay_ms},f=100,q=2"),
+            mux_stack,
+        )?;
+    }
+    let mut apc = Vec::new();
+    write!(
+        apc,
+        "\x1b_Ga=a,i={image_id},r=1,z={first_delay},s=3,v=1,q=2;\x1b\\"
+    )?;
+    write_apc(&mut buf, &apc, mux_stack);
+    out.write_all(&buf)
+}
+
 /// Display a single PNG at the cursor under an explicit ID (`a=T,i=`).
 ///
 /// The one-phase fallback for targets where transmit-then-place is not
@@ -633,6 +682,32 @@ mod tests {
             !output.contains(placeholder::PLACEHOLDER),
             "the caller positions the grid itself"
         );
+    }
+
+    #[test]
+    fn virtual_animation_transmit_carries_the_whole_sequence_gridless() {
+        let frames = vec![(b"f1".to_vec(), 100u32), (b"f2".to_vec(), 150)];
+        let mut out = Vec::new();
+        transmit_animation_virtual(&frames, &mut out, &[], 42, 1, 4, 2).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.starts_with("\x1b_Ga=T,f=100,i=42,U=1,c=4,r=2,p=1,q=2;"));
+        assert!(output.contains("a=f,i=42,r=2,z=150"));
+        assert!(output.contains("a=a,i=42,r=1,z=100,s=3,v=1"));
+        assert!(
+            !output.contains(placeholder::PLACEHOLDER),
+            "the caller positions the grid itself"
+        );
+    }
+
+    #[test]
+    fn virtual_animation_transmit_with_one_frame_is_a_plain_transmit() {
+        let frames = vec![(b"only".to_vec(), 100u32)];
+        let mut out = Vec::new();
+        transmit_animation_virtual(&frames, &mut out, &[], 42, 1, 4, 2).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.starts_with("\x1b_Ga=T,f=100,i=42,U=1,c=4,r=2,p=1,q=2;"));
+        assert!(!output.contains("a=f,"));
+        assert!(!output.contains("a=a,"));
     }
 
     #[test]

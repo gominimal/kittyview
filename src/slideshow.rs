@@ -371,18 +371,10 @@ impl Renderer<'_> {
         // direct placement at the origin still shows the image.
         let virtual_grid = if self.use_placeholders { rect } else { None };
 
-        // A grid emitted inline (newline-separated, only the animation path)
-        // falls back to column 1 on every newline, so it left-aligns;
-        // everything else is centred.
-        let inline_grid = virtual_grid.is_some() && animated;
         let (origin_row, origin_col) = match rect {
             Some((cols, rows)) => (
                 (self.avail_rows() - rows) / 2 + 1,
-                if inline_grid {
-                    1
-                } else {
-                    self.geom.cols.saturating_sub(cols) / 2 + 1
-                },
+                self.geom.cols.saturating_sub(cols) / 2 + 1,
             ),
             None => (1, 1),
         };
@@ -401,11 +393,23 @@ impl Renderer<'_> {
         }
 
         // Phase one, virtual placements only: the new image's data goes out
-        // while the old slide still shows. `a=T,U=1` displays nothing until
-        // placeholder cells reference it, so this whole transmission is
-        // invisible and the visible switch below stays a small burst.
-        if !animated {
-            if let Some((cols, rows)) = virtual_grid {
+        // while the old slide still shows. Nothing addressed to a virtual
+        // placement displays until placeholder cells reference it --
+        // animation frames and loop start included -- so the whole
+        // transmission is invisible and the visible switch below stays a
+        // small burst.
+        if let Some((cols, rows)) = virtual_grid {
+            if animated {
+                kitty::transmit_animation_virtual(
+                    frames,
+                    &mut buf,
+                    self.mux_stack,
+                    image_id,
+                    SLIDE_PLACEMENT_ID,
+                    cols,
+                    rows,
+                )?;
+            } else {
                 kitty::transmit_virtual(
                     png,
                     &mut buf,
@@ -431,18 +435,7 @@ impl Renderer<'_> {
         // included.
         buf.extend_from_slice(b"\x1b[H\x1b[J");
 
-        if animated {
-            buf.extend_from_slice(cursor_to(origin_row, origin_col).as_bytes());
-            let placement = match virtual_grid {
-                Some((cols, rows)) => Placement::Virtual {
-                    image_id,
-                    cols,
-                    rows,
-                },
-                None => Placement::Direct,
-            };
-            kitty::display_animation(frames, &mut buf, self.mux_stack, placement)?;
-        } else if let Some((cols, rows)) = virtual_grid {
+        if let Some((cols, rows)) = virtual_grid {
             // The data and placement are already in the terminal; the grid
             // cells are what makes the image appear.
             let mut grid = String::new();
@@ -451,6 +444,13 @@ impl Renderer<'_> {
                 placeholder::write_row(&mut grid, image_id, Some(SLIDE_PLACEMENT_ID), cols, row);
             }
             buf.extend_from_slice(grid.as_bytes());
+        } else if animated {
+            // A direct animation displays as it streams; it cannot precede
+            // the prelude on direct terminals (per-screen image stores) and
+            // is not worth a special path under passthrough, where direct
+            // placement is already documented as degraded.
+            buf.extend_from_slice(cursor_to(origin_row, origin_col).as_bytes());
+            kitty::display_animation(frames, &mut buf, self.mux_stack, Placement::Direct)?;
         } else {
             // Direct placement draws at the cursor as it streams, so the
             // screen shows the erase until the data has arrived -- the
@@ -1299,6 +1299,54 @@ mod tests {
             transmit < enter && enter < erase,
             "transmit, then switch screens, then draw"
         );
+    }
+
+    #[test]
+    fn animated_virtual_slides_follow_the_same_prelude_ordering() {
+        // Frames and loop start address the image, not the screen, so the
+        // whole animation rides in phase one -- before the screen switch
+        // under passthrough, after it on direct terminals.
+        let frames = vec![(png_stub(160, 160), 100), (png_stub(160, 160), 100)];
+
+        let stack = [Mux::Tmux(None)];
+        let r = Renderer {
+            mux_stack: &stack,
+            use_placeholders: true,
+            geom: test_geometry(),
+        };
+        let mut out = Vec::new();
+        r.draw(&mut out, &frames, " 1/2  a.png", None, enter_sequence())
+            .unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let loop_start = text.find("a=a,").unwrap();
+        let enter = text.find("\x1b[?1049h").unwrap();
+        assert!(
+            loop_start < enter,
+            "the whole animation precedes the screen switch under passthrough"
+        );
+
+        let mut out = Vec::new();
+        renderer(true)
+            .draw(&mut out, &frames, " 1/2  a.png", None, enter_sequence())
+            .unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let enter = text.find("\x1b[?1049h").unwrap();
+        let base = text.find("a=T,f=100").unwrap();
+        assert!(
+            enter < base,
+            "on direct terminals the screen switch still comes first"
+        );
+    }
+
+    #[test]
+    fn animated_virtual_grids_are_centred_and_bound() {
+        // With the animation transmitted separately from its grid, the
+        // rows are cursor-positioned like static slides: centred, and
+        // bound to the slide placement ID.
+        let frames = vec![(png_stub(160, 160), 100), (png_stub(160, 160), 100)];
+        let (out, _) = draw_to_string(&renderer(true), &frames, None);
+        assert!(out.contains("\x1b[7;31H"), "grid rows are centred");
+        assert_eq!(out.matches("\x1b[58;5;1m").count(), 10, "one per row");
     }
 
     #[test]
