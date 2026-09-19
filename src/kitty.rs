@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CHUNK_SIZE: usize = 4096;
 
 /// Image ID used for direct animations, which need an ID but not a stable one.
-const DEFAULT_ANIMATION_ID: u32 = 1;
+pub(crate) const DEFAULT_ANIMATION_ID: u32 = 1;
 
 /// How an image is anchored to the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +161,91 @@ fn write_placeholders(buf: &mut Vec<u8>, placement: Placement) {
     let mut grid = String::new();
     placeholder::write_grid(&mut grid, image_id, cols, rows);
     buf.extend_from_slice(grid.as_bytes());
+}
+
+/// Transmit a PNG and create its virtual placement in one command
+/// (`a=T,U=1`), without the placeholder grid; the caller positions the grid
+/// rows itself.
+///
+/// A virtual placement shows nothing until placeholder cells reference it,
+/// so this whole transmission is invisible -- which is what lets a
+/// slideshow stream the next image while the previous slide is still on
+/// screen, using the same single command as ordinary display rather than a
+/// transmit-then-place split (`a=t` + `a=p`) that at least one
+/// implementation in the wild renders blank.
+/// The placement is created under an explicit `placement_id`, which the
+/// placeholder cells repeat in their underline colour: that pins the cells
+/// to exactly this placement, where an ID-less placement leaves the choice
+/// to the terminal -- and Ghostty through 1.3.1 chooses in hash order when
+/// the image ever carries a second virtual placement.
+pub fn transmit_virtual(
+    png_data: &[u8],
+    out: &mut impl Write,
+    mux_stack: &[Mux],
+    image_id: u32,
+    placement_id: u32,
+    cols: u16,
+    rows: u16,
+) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(png_data.len() * 2);
+    write_frame_data(
+        &mut buf,
+        png_data,
+        &format!("a=T,f=100,i={image_id},U=1,c={cols},r={rows},p={placement_id},q=2"),
+        mux_stack,
+    )?;
+    out.write_all(&buf)
+}
+
+/// Display a single PNG at the cursor under an explicit ID (`a=T,i=`).
+///
+/// The one-phase fallback for targets where transmit-then-place is not
+/// trusted; the ID is what lets the next slide delete this one.
+pub fn display_png_with_id(
+    png_data: &[u8],
+    out: &mut impl Write,
+    mux_stack: &[Mux],
+    image_id: u32,
+) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(png_data.len() * 2);
+    write_frame_data(
+        &mut buf,
+        png_data,
+        &format!("a=T,f=100,i={image_id},q=2"),
+        mux_stack,
+    )?;
+    out.write_all(&buf)
+}
+
+/// Delete an image's placements (`d=i`); with `free_data`, its stored data
+/// as well (`d=I`).
+///
+/// The case matters: lowercase keeps the data resident for redisplay,
+/// uppercase gives the terminal its memory back. Both forms also remove
+/// virtual placements, which no text erase and no `d=a`/`d=A` ever touches.
+pub fn delete_image(
+    out: &mut impl Write,
+    mux_stack: &[Mux],
+    image_id: u32,
+    free_data: bool,
+) -> io::Result<()> {
+    let verb = if free_data { 'I' } else { 'i' };
+    let mut buf = Vec::new();
+    let mut apc = Vec::new();
+    write!(apc, "\x1b_Ga=d,d={verb},i={image_id},q=2;\x1b\\")?;
+    write_apc(&mut buf, &apc, mux_stack);
+    out.write_all(&buf)
+}
+
+/// Delete every image visible on screen and free their data (`a=d,d=A`).
+///
+/// Exit hygiene: virtual placements are not covered (the protocol scopes
+/// `d=A` to placements with a physical location), so the slideshow also
+/// deletes its current image by ID.
+pub fn delete_all(out: &mut impl Write, mux_stack: &[Mux]) -> io::Result<()> {
+    let mut buf = Vec::new();
+    write_apc(&mut buf, b"\x1b_Ga=d,d=A,q=2;\x1b\\", mux_stack);
+    out.write_all(&buf)
 }
 
 /// Display a single PNG image via the kitty graphics protocol.
@@ -534,5 +619,69 @@ mod tests {
             let output = String::from_utf8(out).unwrap();
             assert!(output.contains("q=2"), "{placement:?}");
         }
+    }
+
+    // ── two-phase slideshow emitters ────────────────────────
+
+    #[test]
+    fn virtual_transmit_combines_placement_and_omits_the_grid() {
+        let mut out = Vec::new();
+        transmit_virtual(b"tiny", &mut out, &[], 42, 1, 4, 2).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.starts_with("\x1b_Ga=T,f=100,i=42,U=1,c=4,r=2,p=1,q=2;"));
+        assert!(
+            !output.contains(placeholder::PLACEHOLDER),
+            "the caller positions the grid itself"
+        );
+    }
+
+    #[test]
+    fn virtual_transmit_chunks_large_images_like_display() {
+        let data = vec![0xABu8; 8000];
+        let mut out = Vec::new();
+        transmit_virtual(&data, &mut out, &[], 7, 1, 4, 2).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.starts_with("\x1b_Ga=T,f=100,i=7,U=1,c=4,r=2,p=1,q=2,m=1;"));
+        let starts = output.matches("\x1b_G").count();
+        let ends = output.matches("\x1b\\").count();
+        assert_eq!(starts, ends);
+    }
+
+    #[test]
+    fn display_with_id_places_at_cursor_deletably() {
+        let mut out = Vec::new();
+        display_png_with_id(b"tiny", &mut out, &[], 9).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.starts_with("\x1b_Ga=T,f=100,i=9,q=2;"));
+    }
+
+    #[test]
+    fn delete_case_decides_whether_data_is_freed() {
+        let mut kept = Vec::new();
+        delete_image(&mut kept, &[], 7, false).unwrap();
+        assert_eq!(kept, b"\x1b_Ga=d,d=i,i=7,q=2;\x1b\\");
+
+        let mut freed = Vec::new();
+        delete_image(&mut freed, &[], 7, true).unwrap();
+        assert_eq!(freed, b"\x1b_Ga=d,d=I,i=7,q=2;\x1b\\");
+    }
+
+    #[test]
+    fn delete_all_frees_everything_visible() {
+        let mut out = Vec::new();
+        delete_all(&mut out, &[]).unwrap();
+        assert_eq!(out, b"\x1b_Ga=d,d=A,q=2;\x1b\\");
+    }
+
+    #[test]
+    fn slideshow_emitters_are_passthrough_wrapped() {
+        let stack = [Mux::Tmux(None)];
+        let mut out = Vec::new();
+        transmit_virtual(b"tiny", &mut out, &stack, 7, 1, 2, 2).unwrap();
+        display_png_with_id(b"tiny", &mut out, &stack, 7).unwrap();
+        delete_image(&mut out, &stack, 7, true).unwrap();
+        delete_all(&mut out, &stack).unwrap();
+        let wraps = out.windows(7).filter(|w| *w == b"\x1bPtmux;").count();
+        assert_eq!(wraps, 4, "every APC must be independently wrapped");
     }
 }

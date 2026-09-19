@@ -150,35 +150,79 @@ fn fg_sgr(image_id: u32) -> String {
 /// plain text and must NOT be wrapped in multiplexer passthrough -- the
 /// multiplexer has to see these cells to be able to scroll them.
 pub fn write_grid(buf: &mut String, image_id: u32, cols: u16, rows: u16) {
+    if cols == 0 {
+        return;
+    }
+    let rows = rows.min(u16::try_from(MAX_INDEX).unwrap_or(u16::MAX) + 1);
+    for row in 0..rows {
+        if row > 0 {
+            buf.push('\n');
+        }
+        write_row(buf, image_id, None, cols, row);
+    }
+}
+
+/// Write one row of the placeholder grid, self-contained: the SGR colours
+/// are set before the cells and reset after.
+///
+/// A newline advances to column 1, so [`write_grid`]'s newline-separated
+/// rows only align when the grid starts there. Positioning a grid anywhere
+/// else means emitting each row after its own cursor move, which is what
+/// this is for.
+///
+/// With a `placement_id`, the cells carry it in the underline colour, and
+/// the terminal resolves them against exactly that placement of the image.
+/// Without one, the terminal picks among the image's virtual placements
+/// itself -- which Ghostty through 1.3.1 does in hash order, so any second
+/// virtual placement on the image (another program's, a probe's) can
+/// capture the cells. Binding by ID is what makes the resolution exact.
+pub fn write_row(buf: &mut String, image_id: u32, placement_id: Option<u32>, cols: u16, row: u16) {
     let cols = (cols as usize).min(MAX_INDEX + 1);
-    let rows = (rows as usize).min(MAX_INDEX + 1);
-    if cols == 0 || rows == 0 {
+    let Some(row_d) = diacritic(row as usize) else {
+        return;
+    };
+    if cols == 0 {
         return;
     }
 
-    let fg = fg_sgr(image_id);
     // The most significant byte of the ID rides in a third diacritic, since
     // the foreground colour only carries 24 bits.
     let msb = ((image_id >> 24) & 0xFF) as usize;
     let msb_diacritic = if msb == 0 { None } else { diacritic(msb) };
 
-    for row in 0..rows {
-        if row > 0 {
-            buf.push('\n');
+    buf.push_str(&fg_sgr(image_id));
+    if let Some(p) = placement_id {
+        buf.push_str(&ul_sgr(p));
+    }
+    for col in 0..cols {
+        let Some(col_d) = diacritic(col) else { break };
+        buf.push(PLACEHOLDER);
+        buf.push(row_d);
+        buf.push(col_d);
+        if let Some(d) = msb_diacritic {
+            buf.push(d);
         }
-        buf.push_str(&fg);
-        let Some(row_d) = diacritic(row) else { break };
-        for col in 0..cols {
-            let Some(col_d) = diacritic(col) else { break };
-            buf.push(PLACEHOLDER);
-            buf.push(row_d);
-            buf.push(col_d);
-            if let Some(d) = msb_diacritic {
-                buf.push(d);
-            }
-        }
-        // Restore the default foreground so following text is unaffected.
-        let _ = write!(buf, "\x1b[39m");
+    }
+    // Restore the default colours so following text is unaffected.
+    if placement_id.is_some() {
+        let _ = write!(buf, "\x1b[59m");
+    }
+    let _ = write!(buf, "\x1b[39m");
+}
+
+/// SGR sequence selecting `placement_id`'s low 24 bits as the underline
+/// colour, with the same form rules as [`fg_sgr`].
+fn ul_sgr(placement_id: u32) -> String {
+    let low = placement_id & 0x00FF_FFFF;
+    if low <= 0xFF {
+        format!("\x1b[58;5;{low}m")
+    } else {
+        format!(
+            "\x1b[58;2;{};{};{}m",
+            (low >> 16) & 0xFF,
+            (low >> 8) & 0xFF,
+            low & 0xFF
+        )
     }
 }
 
@@ -336,5 +380,35 @@ mod tests {
         let mut buf = String::new();
         write_grid(&mut buf, 1, 5000, 1);
         assert_eq!(buf.matches(PLACEHOLDER).count(), MAX_INDEX + 1);
+    }
+
+    #[test]
+    fn a_single_row_matches_its_line_of_the_grid() {
+        let mut grid = String::new();
+        write_grid(&mut grid, 42, 2, 2);
+        let mut rows = String::new();
+        write_row(&mut rows, 42, None, 2, 0);
+        rows.push('\n');
+        write_row(&mut rows, 42, None, 2, 1);
+        assert_eq!(grid, rows);
+    }
+
+    #[test]
+    fn a_row_is_self_contained_for_cursor_positioning() {
+        // Emitted between cursor moves, a row must set and reset its own
+        // colour and contain no newline that would drag it to column 1.
+        let mut buf = String::new();
+        write_row(&mut buf, 42, None, 3, 1);
+        assert!(buf.starts_with("\x1b[38;5;42m"));
+        assert!(buf.ends_with("\x1b[39m"));
+        assert!(!buf.contains('\n'));
+        assert_eq!(buf.matches(PLACEHOLDER).count(), 3);
+    }
+
+    #[test]
+    fn a_row_beyond_the_diacritic_table_emits_nothing() {
+        let mut buf = String::new();
+        write_row(&mut buf, 1, None, 3, 297);
+        assert!(buf.is_empty());
     }
 }
