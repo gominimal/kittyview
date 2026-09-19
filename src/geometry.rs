@@ -181,7 +181,8 @@ fn query_cell_size(_mux_stack: &[Mux], _cols: u16, _rows: u16) -> Option<(u32, u
 /// Parse an XTWINOPS report `CSI <kind> ; <height> ; <width> t`.
 ///
 /// Returns `(height, width)` in the report's own order.
-fn parse_xtwinops(response: &[u8], kind: u32) -> Option<(u32, u32)> {
+/// Public for the fuzz targets: this parser faces terminal-controlled input.
+pub fn parse_xtwinops(response: &[u8], kind: u32) -> Option<(u32, u32)> {
     let start = response.windows(2).position(|w| w == b"\x1b[")? + 2;
     let end = start + response[start..].iter().position(|&b| b == b't')?;
     let params = std::str::from_utf8(&response[start..end]).ok()?;

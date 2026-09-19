@@ -342,7 +342,9 @@ const BARRIER_DRAIN_GRACE: Duration = Duration::from_millis(50);
 // ─── Response parsers ───────────────────────────────────────
 
 /// Parsed DA2 response parameters.
-struct Da2Info {
+///
+/// Public only so the fuzz targets can name the parser's return type.
+pub struct Da2Info {
     pp: u32,
     pv: u32,
 }
@@ -350,7 +352,8 @@ struct Da2Info {
 /// Parse an XTVERSION response: `ESC P > | name(version) ST`
 ///
 /// Returns the terminal (or mux) identified by the name string.
-fn parse_xtversion(response: &[u8]) -> Option<(Terminal, Option<Mux>)> {
+/// Public for the fuzz targets: this parser faces terminal-controlled input.
+pub fn parse_xtversion(response: &[u8]) -> Option<(Terminal, Option<Mux>)> {
     // Find the DCS payload start marker ">|"
     let marker = response.windows(2).position(|w| w == b">|")?;
     let payload_start = marker + 2;
@@ -465,7 +468,9 @@ fn find_st(data: &[u8], from: usize) -> Option<usize> {
 }
 
 /// Parse a DA2 response: `ESC [ > Pp ; Pv ; Pc c`
-fn parse_da2(response: &[u8]) -> Option<Da2Info> {
+///
+/// Public for the fuzz targets: this parser faces terminal-controlled input.
+pub fn parse_da2(response: &[u8]) -> Option<Da2Info> {
     let start = response.windows(3).position(|w| w == b"\x1b[>")?;
     let params_start = start + 3;
 
@@ -518,7 +523,9 @@ trait TerminalQuerier {
 /// The reply is an APC sequence whose payload is `keys;status`, where the
 /// status is `OK` or an error code such as `ENOTSUPPORTED`. Anything else --
 /// the bare DA barrier, nothing at all -- means the question went unanswered.
-fn parse_graphics_probe(response: &[u8]) -> GraphicsProbe {
+///
+/// Public for the fuzz targets: this parser faces terminal-controlled input.
+pub fn parse_graphics_probe(response: &[u8]) -> GraphicsProbe {
     let Some(start) = response.windows(3).position(|w| w == b"\x1b_G") else {
         return GraphicsProbe::Unanswered;
     };
@@ -1141,7 +1148,9 @@ pub(crate) mod tty {
 }
 
 /// Check whether a response buffer contains a complete terminal response.
-fn is_response_complete(buf: &[u8]) -> bool {
+///
+/// Public for the fuzz targets: this scanner faces terminal-controlled input.
+pub fn is_response_complete(buf: &[u8]) -> bool {
     let len = buf.len();
     if len < 2 {
         return false;
