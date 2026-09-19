@@ -845,7 +845,7 @@ pub(crate) mod tty {
         fn discard_pending(&self) {
             let mut byte = [0u8];
             loop {
-                if !poll_fd(self.read_fd, Duration::ZERO).unwrap_or(false) {
+                if !wait_readable(self.read_fd, Duration::ZERO).unwrap_or(false) {
                     break;
                 }
                 let ret = unsafe { libc::read(self.read_fd, byte.as_mut_ptr().cast(), 1) };
@@ -865,7 +865,7 @@ pub(crate) mod tty {
                 if remaining.is_zero() {
                     break;
                 }
-                if !poll_fd(self.read_fd, remaining).unwrap_or(false) {
+                if !wait_readable(self.read_fd, remaining).unwrap_or(false) {
                     break;
                 }
                 let mut byte = [0u8];
@@ -925,14 +925,45 @@ pub(crate) mod tty {
         Ok(RawModeGuard { fd, original })
     }
 
-    fn poll_fd(fd: RawFd, timeout: Duration) -> io::Result<bool> {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
+    /// Wait until `fd` is readable or the timeout passes.
+    ///
+    /// This is select(2), not poll(2), because macOS poll does not support
+    /// devices -- its own manual page says so under BUGS. A poll on the
+    /// `/dev/tty` character device there returns immediately with POLLNVAL,
+    /// which reads as "never readable": every query would silently time out
+    /// whenever stdin is a pipe, and the replies the terminal still sends
+    /// would land unread on the shell prompt. select has a separate, working
+    /// kernel path for `/dev/tty`, and is how fzf, less and kitty's own
+    /// tools wait on it. An interrupted wait reports "nothing readable"
+    /// rather than an error, so a signal returns control to the caller.
+    pub(crate) fn wait_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+        // FD_SET on an fd at or above FD_SETSIZE is a buffer overflow, not
+        // an error return. Terminal fds are small; refuse the rest.
+        if fd < 0 || fd as usize >= libc::FD_SETSIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fd out of range for select",
+            ));
+        }
+        let mut readfds = unsafe { std::mem::zeroed::<libc::fd_set>() };
+        unsafe {
+            libc::FD_ZERO(&mut readfds);
+            libc::FD_SET(fd, &mut readfds);
+        }
+        // Timeouts here are seconds at most; clamp far below any time_t.
+        let mut tv = libc::timeval {
+            tv_sec: timeout.as_secs().min(i32::MAX as u64) as libc::time_t,
+            tv_usec: libc::suseconds_t::from(timeout.subsec_micros() as i32),
         };
-        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        let ret = unsafe {
+            libc::select(
+                fd + 1,
+                &mut readfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
         if ret < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
@@ -940,7 +971,7 @@ pub(crate) mod tty {
             }
             return Err(err);
         }
-        Ok(ret > 0 && (pfd.revents & libc::POLLIN) != 0)
+        Ok(ret > 0 && unsafe { libc::FD_ISSET(fd, &readfds) })
     }
 
     /// Detect using in-band queries, falling back to env vars.
@@ -1860,5 +1891,73 @@ mod tests {
             q.drained,
             "the trailing DA1 barrier was left for the prompt"
         );
+    }
+
+    // ── wait_readable (select) ──────────────────────────────
+
+    #[cfg(unix)]
+    mod wait_readable {
+        use super::super::tty::wait_readable;
+        use std::time::Duration;
+
+        /// A pipe whose ends are closed on drop.
+        struct Pipe {
+            read: libc::c_int,
+            write: libc::c_int,
+        }
+
+        impl Pipe {
+            fn new() -> Self {
+                let mut fds = [0 as libc::c_int; 2];
+                assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+                Self {
+                    read: fds[0],
+                    write: fds[1],
+                }
+            }
+        }
+
+        impl Drop for Pipe {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::close(self.read);
+                    libc::close(self.write);
+                }
+            }
+        }
+
+        #[test]
+        fn pending_bytes_report_ready() {
+            let pipe = Pipe::new();
+            assert_eq!(
+                unsafe { libc::write(pipe.write, b"x".as_ptr().cast(), 1) },
+                1
+            );
+            assert!(wait_readable(pipe.read, Duration::from_secs(1)).unwrap());
+        }
+
+        #[test]
+        fn an_empty_fd_times_out() {
+            let pipe = Pipe::new();
+            assert!(!wait_readable(pipe.read, Duration::from_millis(10)).unwrap());
+        }
+
+        #[test]
+        fn a_zero_timeout_is_a_non_blocking_check() {
+            let pipe = Pipe::new();
+            assert!(!wait_readable(pipe.read, Duration::ZERO).unwrap());
+            assert_eq!(
+                unsafe { libc::write(pipe.write, b"x".as_ptr().cast(), 1) },
+                1
+            );
+            assert!(wait_readable(pipe.read, Duration::ZERO).unwrap());
+        }
+
+        #[test]
+        fn fds_beyond_fd_setsize_are_refused_not_overflowed() {
+            let fd = libc::FD_SETSIZE as libc::c_int;
+            assert!(wait_readable(fd, Duration::ZERO).is_err());
+            assert!(wait_readable(-1, Duration::ZERO).is_err());
+        }
     }
 }
