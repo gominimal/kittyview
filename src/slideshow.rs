@@ -619,7 +619,12 @@ mod unix {
         session.restore_termios();
         unsafe {
             libc::signal(libc::SIGTSTP, libc::SIG_DFL);
-            libc::raise(libc::SIGTSTP);
+            // Stop the whole process group, not just this process: run
+            // from a wrapper script, the wrapper shares the group, and if
+            // it kept running the interactive shell would never show a
+            // prompt -- leaving `fg` nothing to resume. This is fzf's
+            // suspend; run directly, the group is just us.
+            libc::kill(0, libc::SIGTSTP);
             // Stopped here until SIGCONT.
             libc::signal(
                 libc::SIGTSTP,

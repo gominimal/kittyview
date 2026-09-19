@@ -73,7 +73,7 @@ echo "In the slideshow, please exercise:"
 echo "  - Right/Down/Space/n and Left/Up/Backspace/p to move back and forth"
 echo "  - Home and End (Fn+Left / Fn+Right on a Mac keyboard)"
 echo "  - r to force a redraw"
-echo "  - Ctrl-Z to suspend, then 'fg' to resume"
+echo "  - Ctrl-Z to suspend (this whole script stops with it), then 'fg'"
 echo "  - q (or Esc, or Ctrl-C) to quit"
 echo
 read -r -p "Press Enter to start the slideshow..."
