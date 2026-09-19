@@ -331,13 +331,22 @@ impl Renderer<'_> {
     /// Draw one slide, replacing the image `prev_id`, and return the ID the
     /// new image is on screen under (`None` if nothing was placed).
     ///
-    /// `prelude` is written after the image transmission and before the
-    /// screen is touched -- it is how the alternate screen is entered on
-    /// the first draw. The ordering is load-bearing under tmux: switching
-    /// the pane's screen schedules a full redraw, and until that settles
-    /// tmux silently drops passthrough for visible-only clients, so a
-    /// transmission sent just after `?1049h` never reaches the terminal.
-    /// Sent just before it, it always does.
+    /// `prelude` is how the alternate screen is entered on the first draw,
+    /// and where it goes relative to the transmission depends on who sits
+    /// between us and the terminal -- both orders are load-bearing, in
+    /// opposite directions:
+    ///
+    /// - Direct (and under Zellij, which receives the switch itself):
+    ///   prelude first. Kitty-model terminals keep a separate image store
+    ///   per screen buffer, so an image transmitted on the main screen
+    ///   does not exist on the alternate screen, and cells drawn there
+    ///   would reference nothing.
+    /// - Through tmux/screen passthrough: transmission first. Switching
+    ///   the pane's screen schedules a full redraw, and until it settles
+    ///   tmux silently drops passthrough, so a transmission sent just
+    ///   after `?1049h` never reaches the terminal -- while the outer
+    ///   terminal, whose store holds the image, never switches screens at
+    ///   all.
     pub fn draw(
         &self,
         out: &mut impl Write,
@@ -381,6 +390,16 @@ impl Renderer<'_> {
         let image_id = kitty::pick_image_id(self.mux_stack);
         let mut buf = Vec::new();
 
+        // Whether a passthrough layer separates us from the terminal; see
+        // the method comment for how it decides the prelude's position.
+        let transmit_first = self
+            .mux_stack
+            .iter()
+            .any(|m| matches!(m, Mux::Tmux(_) | Mux::Screen(_)));
+        if !transmit_first {
+            buf.extend_from_slice(prelude);
+        }
+
         // Phase one, virtual placements only: the new image's data goes out
         // while the old slide still shows. `a=T,U=1` displays nothing until
         // placeholder cells reference it, so this whole transmission is
@@ -399,9 +418,9 @@ impl Renderer<'_> {
             }
         }
 
-        // The screen entry, if this draw carries one -- after the
-        // transmission, for tmux's sake (see above).
-        buf.extend_from_slice(prelude);
+        if transmit_first {
+            buf.extend_from_slice(prelude);
+        }
 
         // The visible switch: out with the old, in with the new.
         if let Some(prev) = prev_id {
@@ -807,8 +826,8 @@ mod unix {
             cache: SlideCache::new(),
             current_id: None,
             // The alternate screen is entered by the first draw itself,
-            // after its image transmission -- see Renderer::draw for why
-            // the order matters under tmux.
+            // ordered around its image transmission per target -- see
+            // Renderer::draw for why each order is load-bearing.
             pending_enter: true,
             force_cycle: false,
             first_draw_done: false,
@@ -1237,15 +1256,40 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_entry_prelude_follows_the_transmission() {
-        // tmux schedules a full pane redraw on the alternate-screen switch
-        // and silently drops passthrough until it settles, so a
-        // transmission sent after `?1049h` never arrives. The first draw
-        // must transmit first and switch screens second.
+    fn direct_terminals_enter_the_screen_before_transmitting() {
+        // Kitty-model terminals keep a separate image store per screen
+        // buffer: an image transmitted on the main screen does not exist
+        // on the alternate screen, so the switch must come first.
         let frames = vec![(png_stub(160, 160), 0)];
         let mut out = Vec::new();
         renderer(true)
             .draw(&mut out, &frames, " 1/2  a.png", None, enter_sequence())
+            .unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let enter = text.find("\x1b[?1049h").unwrap();
+        let transmit = text.find("a=T,f=100").unwrap();
+        let erase = text.find("\x1b[H\x1b[J").unwrap();
+        assert!(
+            enter < transmit && transmit < erase,
+            "switch screens, then transmit, then draw"
+        );
+    }
+
+    #[test]
+    fn passthrough_stacks_transmit_before_entering_the_screen() {
+        // tmux schedules a full pane redraw on the alternate-screen switch
+        // and silently drops passthrough until it settles, so through a
+        // passthrough stack the transmission must come first -- the outer
+        // terminal, whose store holds the image, never switches screens.
+        let frames = vec![(png_stub(160, 160), 0)];
+        let stack = [Mux::Tmux(None)];
+        let r = Renderer {
+            mux_stack: &stack,
+            use_placeholders: true,
+            geom: test_geometry(),
+        };
+        let mut out = Vec::new();
+        r.draw(&mut out, &frames, " 1/2  a.png", None, enter_sequence())
             .unwrap();
         let text = String::from_utf8_lossy(&out);
         let transmit = text.find("a=T,f=100").unwrap();
