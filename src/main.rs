@@ -47,7 +47,7 @@ fn parse_passthrough(s: &str) -> Result<Option<Vec<Mux>>, String> {
     version,
     about = "Display images in kitty-compatible terminals",
     after_help = "More than one file opens an interactive slideshow: \
-                  Right/Space/n next, Left/Backspace/p previous, \
+                  Right/Down/Space/n next, Left/Up/Backspace/p previous, \
                   Home/End first/last, r redraw, q/Esc quit."
 )]
 struct Cli {

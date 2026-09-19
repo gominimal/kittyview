@@ -79,8 +79,8 @@ Giving kittyview more than one file opens an interactive slideshow on the termin
 
 | Key                              | Action                        |
 |----------------------------------|-------------------------------|
-| Right, Space, `n`                | next image                    |
-| Left, Backspace, `p`             | previous image                |
+| Right, Down, Space, `n`          | next image                    |
+| Left, Up, Backspace, `p`         | previous image                |
 | Home / End (also PgUp / PgDn)    | first / last image            |
 | `r`                              | redraw the slide from scratch |
 | Ctrl-Z                           | suspend (resume with `fg`)    |

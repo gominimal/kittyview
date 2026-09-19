@@ -3,7 +3,7 @@
 //! Interactive slideshow over a list of image files.
 //!
 //! Runs on the alternate screen buffer (DECSET 1049), reading keys from the
-//! terminal in raw mode: Right/Space/n advance, Left/Backspace/p go back,
+//! terminal in raw mode: Right/Down/Space/n advance, Left/Up/Backspace/p go back,
 //! Home/End jump to the ends, and q/Esc/Ctrl-C leave. Every kitty-graphics
 //! terminal implements mode 1049, so entering it -- and leaving it on every
 //! exit path -- is what keeps the user's scrollback exactly as it was.
@@ -124,8 +124,11 @@ fn csi_key(src: &mut impl ByteSource) -> Key {
 /// Map a CSI/SS3 final byte (and any parameters) to a key.
 fn function_key(final_byte: u8, params: &[u8]) -> Key {
     match final_byte {
-        b'C' => Key::Next,
-        b'D' => Key::Prev,
+        // Left/Right are the canonical pair; Up/Down navigate too, not
+        // least because Mac keyboards hide Home/End and PgUp/PgDn behind
+        // the Fn layer and reaching for the bare arrows is natural.
+        b'C' | b'B' => Key::Next,
+        b'D' | b'A' => Key::Prev,
         b'H' => Key::First,
         b'F' => Key::Last,
         // The tilde family: CSI <num> ~.
@@ -969,6 +972,11 @@ mod tests {
         assert_eq!(key_of(b"\x1b[D"), Some(Key::Prev));
         assert_eq!(key_of(b"\x1bOC"), Some(Key::Next));
         assert_eq!(key_of(b"\x1bOD"), Some(Key::Prev));
+        // Up/Down navigate too.
+        assert_eq!(key_of(b"\x1b[B"), Some(Key::Next));
+        assert_eq!(key_of(b"\x1b[A"), Some(Key::Prev));
+        assert_eq!(key_of(b"\x1bOB"), Some(Key::Next));
+        assert_eq!(key_of(b"\x1bOA"), Some(Key::Prev));
     }
 
     #[test]
