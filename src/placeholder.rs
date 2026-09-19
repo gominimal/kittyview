@@ -411,4 +411,19 @@ mod tests {
         write_row(&mut buf, 1, None, 3, 297);
         assert!(buf.is_empty());
     }
+
+    #[test]
+    fn a_bound_row_carries_the_placement_id_in_the_underline_colour() {
+        let mut buf = String::new();
+        write_row(&mut buf, 42, Some(1), 2, 0);
+        assert!(buf.contains("\x1b[58;5;1m"));
+        assert!(buf.contains("\x1b[59m"), "and resets it after the cells");
+    }
+
+    #[test]
+    fn large_placement_ids_use_the_truecolor_underline_form() {
+        let mut buf = String::new();
+        write_row(&mut buf, 42, Some(0x010203), 2, 0);
+        assert!(buf.contains("\x1b[58;2;1;2;3m"));
+    }
 }

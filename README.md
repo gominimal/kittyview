@@ -83,6 +83,7 @@ Giving kittyview more than one file opens an interactive slideshow on the termin
 | Left, Backspace, `p`             | previous image                |
 | Home / End (also PgUp / PgDn)    | first / last image            |
 | `r`                              | redraw the slide from scratch |
+| Ctrl-Z                           | suspend (resume with `fg`)    |
 | `q`, Esc, Ctrl-C                 | quit                          |
 
 Navigation stops at the ends of the list rather than wrapping. Files that fail to load show their error in place and are skipped past with the same keys. `--animate` plays animated slides on terminals that support the kitty animation protocol.

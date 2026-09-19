@@ -1107,6 +1107,16 @@ mod tests {
         assert_eq!(cache.len(), 3, "slides 3, 4 and 5 remain");
     }
 
+    #[test]
+    fn eviction_at_the_first_slide_does_not_underflow() {
+        let mut cache = SlideCache::new();
+        for i in 0..4 {
+            let _ = cache.get_or_load(i, || Ok(vec![(vec![1], 0)]));
+        }
+        cache.retain_near(0);
+        assert_eq!(cache.len(), 2, "slides 0 and 1 remain");
+    }
+
     // ── screen sequences ────────────────────────────────────
 
     #[test]
@@ -1488,6 +1498,21 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("empty image"));
         assert!(text.contains("a=d,d=I,i=9"), "the old slide is removed");
+    }
+
+    #[test]
+    fn a_message_slide_still_enters_the_screen() {
+        // A slideshow whose first file fails to load must still switch to
+        // the alternate screen before erasing anything: the prelude leads,
+        // since a message has no transmission to order around.
+        let mut out = Vec::new();
+        renderer(true)
+            .draw_message(&mut out, "Error: no", " 1/1  x", None, enter_sequence())
+            .unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let enter = text.find("\x1b[?1049h").unwrap();
+        let erase = text.find("\x1b[H\x1b[J").unwrap();
+        assert!(enter < erase, "switch screens before erasing");
     }
 
     #[test]
