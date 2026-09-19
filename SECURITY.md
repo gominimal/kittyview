@@ -18,20 +18,35 @@ Security-relevant areas of kittyview include:
 ## Verifying release artifacts
 
 Release binaries are built and attested with [SLSA build provenance](https://slsa.dev/provenance/)
-by the release workflow. To verify that an asset really came from a CI build of
-this repository:
+by the release workflow. To verify that an asset came from the release it
+claims to -- see [Verifying downloads](README.md#verifying-downloads) for why
+`--source-ref` is what gives a passing check that meaning:
 
+```sh
+gh attestation verify kittyview-linux-amd64.tar.gz \
+  --repo gominimal/kittyview \
+  --source-ref refs/tags/v0.1.5 \
+  --deny-self-hosted-runners
 ```
-gh attestation verify kittyview-linux-amd64.tar.gz --repo gominimal/kittyview
-```
+
+Substitute the tag of the release you downloaded.
 
 Each release also includes the provenance bundle itself
-(`kittyview-provenance.intoto.jsonl`) as an asset, for verification without
-querying GitHub's attestation store:
+(`kittyview-provenance.intoto.jsonl`) as an asset, so verification does not
+have to query GitHub's attestation store. Fully offline verification also
+needs a copy of the Sigstore trusted root, saved while still online:
 
+```sh
+gh attestation trusted-root > trusted_root.jsonl
 ```
-gh attestation verify kittyview-linux-amd64.tar.gz --repo gominimal/kittyview \
-  --bundle kittyview-provenance.intoto.jsonl
+
+```sh
+gh attestation verify kittyview-linux-amd64.tar.gz \
+  --repo gominimal/kittyview \
+  --source-ref refs/tags/v0.1.5 \
+  --deny-self-hosted-runners \
+  --bundle kittyview-provenance.intoto.jsonl \
+  --custom-trusted-root trusted_root.jsonl
 ```
 
 ## Supported versions
