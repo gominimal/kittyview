@@ -26,7 +26,7 @@ claims to -- see [Verifying downloads](README.md#verifying-downloads) for why
 ```sh
 gh attestation verify kittyview-linux-amd64.tar.gz \
   --repo gominimal/kittyview \
-  --source-ref refs/tags/v0.1.5 \
+  --source-ref refs/tags/v0.1.6 \
   --deny-self-hosted-runners
 ```
 
@@ -44,7 +44,7 @@ gh attestation trusted-root > trusted_root.jsonl
 ```sh
 gh attestation verify kittyview-linux-amd64.tar.gz \
   --repo gominimal/kittyview \
-  --source-ref refs/tags/v0.1.5 \
+  --source-ref refs/tags/v0.1.6 \
   --deny-self-hosted-runners \
   --bundle kittyview-provenance.intoto.jsonl \
   --custom-trusted-root trusted_root.jsonl
