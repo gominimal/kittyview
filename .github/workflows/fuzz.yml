@@ -1,0 +1,65 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Weekly, not per-PR: a fuzz run long enough to be useful is too slow
+    # for the PR gate, and libFuzzer findings are not tied to any one change.
+    - cron: "47 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # file an issue when a scheduled run fails
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # cargo-fuzz needs -Z flags for sanitizer instrumentation.
+          toolchain: nightly
+
+      - run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz each target
+        run: |
+          for target in $(cargo fuzz list); do
+            cargo fuzz run "$target" -- -max_total_time=180
+          done
+
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+
+      - name: File an issue on failure
+        # Scheduled-run failure notifications go only to whoever last touched
+        # the cron line, and depend on that user's notification settings. An
+        # issue notifies every watcher and persists until triaged.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # author: filter so a user-opened issue with the same title cannot
+          # capture the bot's comments.
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"Scheduled fuzz run failed\" in:title author:app/github-actions" \
+            --json number --jq '.[0].number')
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Failed again: $url"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Scheduled fuzz run failed" \
+              --body "Run: $url -- crash reproducers are in the run's fuzz-artifacts artifact."
+          fi

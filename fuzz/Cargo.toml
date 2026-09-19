@@ -1,0 +1,26 @@
+[package]
+name = "kittyview-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kittyview = { path = ".." }
+
+[[bin]]
+name = "convert_foreign_objects"
+path = "fuzz_targets/convert_foreign_objects.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png_dimensions"
+path = "fuzz_targets/png_dimensions.rs"
+test = false
+doc = false
+bench = false
