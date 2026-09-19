@@ -1326,7 +1326,12 @@ mod tests {
             !out.contains("a=t,"),
             "no transmit-then-place for animations"
         );
-        assert_eq!(id, Some(id.unwrap()));
+        // A virtual animation reports the random image ID it transmitted
+        // under -- the one the frames reference and the next slide must
+        // delete -- not the fixed direct-animation ID.
+        let id = id.expect("an animation is placed under an ID");
+        assert_ne!(id, kitty::DEFAULT_ANIMATION_ID);
+        assert!(out.contains(&format!("a=f,i={id},")));
     }
 
     #[test]
