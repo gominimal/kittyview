@@ -1362,20 +1362,36 @@ mod tests {
 
     #[test]
     fn animations_use_the_animation_path() {
-        let frames = vec![(png_stub(160, 160), 100), (png_stub(160, 160), 100)];
+        // The image ID is drawn at random by design, so the strongest
+        // available assertion ties the reported ID to every part of the
+        // sequence that must reference it: the base frame, the extra
+        // frame, and the loop-start control -- which is exactly what the
+        // next slide's delete depends on. DELAY_MS is a frame delay, not
+        // an ID.
+        const DELAY_MS: u32 = 100;
+        let frames = vec![
+            (png_stub(160, 160), DELAY_MS),
+            (png_stub(160, 160), DELAY_MS),
+        ];
         let (out, id) = draw_to_string(&renderer(true), &frames, None);
-        assert!(out.contains("a=f,"), "frames are transmitted");
-        assert!(out.contains("s=3,v=1"), "and the loop is started");
         assert!(
             !out.contains("a=t,"),
             "no transmit-then-place for animations"
         );
-        // A virtual animation reports the random image ID it transmitted
-        // under -- the one the frames reference and the next slide must
-        // delete -- not the fixed direct-animation ID.
         let id = id.expect("an animation is placed under an ID");
         assert_ne!(id, kitty::DEFAULT_ANIMATION_ID);
-        assert!(out.contains(&format!("a=f,i={id},")));
+        assert!(
+            out.contains(&format!("a=T,f=100,i={id},U=1")),
+            "the base frame is transmitted under the reported ID"
+        );
+        assert!(
+            out.contains(&format!("a=f,i={id},r=2,z={DELAY_MS}")),
+            "the second frame references it with its delay"
+        );
+        assert!(
+            out.contains(&format!("a=a,i={id},r=1,z={DELAY_MS},s=3,v=1")),
+            "and the loop is started on it"
+        );
     }
 
     #[test]
