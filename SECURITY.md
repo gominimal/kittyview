@@ -15,6 +15,25 @@ Security-relevant areas of kittyview include:
 - **Image decoding**: Malformed images could trigger bugs in decoder libraries. All decoders are pure Rust (no C code).
 - **Terminal escape sequences**: Malformed output could corrupt terminal state. kittyview buffers all protocol output before writing and validates terminal support before emitting.
 
+## Verifying release artifacts
+
+Release binaries are built and attested with [SLSA build provenance](https://slsa.dev/provenance/)
+by the release workflow. To verify that an asset really came from a CI build of
+this repository:
+
+```
+gh attestation verify kittyview-linux-amd64.tar.gz --repo gominimal/kittyview
+```
+
+Each release also includes the provenance bundle itself
+(`kittyview-provenance.intoto.jsonl`) as an asset, for verification without
+querying GitHub's attestation store:
+
+```
+gh attestation verify kittyview-linux-amd64.tar.gz --repo gominimal/kittyview \
+  --bundle kittyview-provenance.intoto.jsonl
+```
+
 ## Supported versions
 
 | Version | Supported |
