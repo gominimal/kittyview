@@ -28,3 +28,9 @@ Thumbs.db
 /CLAUDE.md
 
 
+
+# cargo-fuzz
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/

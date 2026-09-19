@@ -1,19 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-mod geometry;
-mod kitty;
-mod logo;
-mod placeholder;
-mod svg;
-mod terminal;
-
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
-use kitty::Placement;
+use kittyview::kitty::{self, Placement};
+use kittyview::terminal::{self, GraphicsProbe, Mux, Terminal, TerminalInfo};
+use kittyview::{geometry, logo, placeholder, svg};
 use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
-use terminal::{GraphicsProbe, Mux, Terminal, TerminalInfo};
 
 /// Parse the `--passthrough` flag value into a mux stack.
 ///
