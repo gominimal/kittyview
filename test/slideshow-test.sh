@@ -91,9 +91,30 @@ ask_yn "After quitting: is this terminal exactly as it was (prompt, scrollback, 
 ask_yn "Type something at the prompt: no stray characters, no raw mode leftovers?" || true
 
 if [ -n "${TMUX:-}" ]; then
+    # kittyview repaints with `tmux refresh-client` only when tmux is the
+    # single layer between it and the terminal. Nested inside another
+    # multiplexer it falls back to the alternate-screen rebuild, where a
+    # flash between slides is expected rather than a failure -- so the
+    # no-flash question is asked only where the repaint actually runs. The
+    # inner tmux reports its client's TERM, which names that outer layer.
+    outer_term=$(tmux display-message -p '#{client_termname}' 2>/dev/null || echo)
+    case "$outer_term" in
+        tmux*|screen*) repaintable=no ;;
+        *) repaintable=yes ;;
+    esac
+
     echo
-    echo "(Running inside tmux: a brief flash of the pane between slides is"
-    echo " expected, and a diagnostics line should have printed on exit.)"
+    echo "(Running inside tmux: a diagnostics line should have printed on exit.)"
+    ask_yn "Did every slide render fully -- no clipped or partial images?" || true
+    if [ "$repaintable" = yes ]; then
+        echo "(Slides are repainted with 'tmux refresh-client', so there should be"
+        echo " NO flash of the underlying pane between slides.)"
+        ask_yn "Did slides change without flashing the pane underneath?" || true
+    else
+        echo "(Nested multiplexer -- outer TERM is '$outer_term'. kittyview falls"
+        echo " back to the alternate-screen rebuild here, so a brief flash between"
+        echo " slides is expected; skipping the no-flash check.)"
+    fi
     ask_yn "Did the exit diagnostics report 0 'never arrived'?" || true
 fi
 
