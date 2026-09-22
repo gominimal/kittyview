@@ -821,13 +821,29 @@ mod unix {
             // now is what a panic must delete.
             session.arm_emergency_restore(restore_sequence(renderer.mux_stack, state.current_id));
 
+            // The repaint after the loop must not land while this draw is
+            // still in flight: tmux drops passthrough while a redraw is
+            // pending, and every draw shape carries some -- an animation
+            // its frames and loop start, a message slide the delete of the
+            // image it replaces. The verification below pays that wait
+            // already, and its reply proves the drain outright; the two
+            // paths that skip verification have nothing, so they wait here
+            // instead, and only when a repaint will actually follow.
+            let settle_for_repaint = || {
+                if can_repaint(renderer.mux_stack) {
+                    std::thread::sleep(VERIFY_SETTLE);
+                }
+            };
+
             // Nothing to verify without a multiplexer, without an image,
             // or for animations (whose arrival has no cheap check).
             let Some(image_id) = drawn else {
+                settle_for_repaint();
                 settled = true;
                 break;
             };
             if renderer.mux_stack.is_empty() || animated {
+                settle_for_repaint();
                 settled = true;
                 break;
             }
