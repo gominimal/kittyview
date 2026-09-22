@@ -35,7 +35,7 @@ Every release binary carries a [build provenance attestation](https://docs.githu
 ```sh
 gh attestation verify kittyview-linux-amd64.tar.gz \
   --repo gominimal/kittyview \
-  --source-ref refs/tags/v0.1.6 \
+  --source-ref refs/tags/v0.1.7 \
   --deny-self-hosted-runners
 ```
 
@@ -77,18 +77,22 @@ When no file is given and stdin is piped, kittyview reads from stdin automatical
 
 Giving kittyview more than one file opens an interactive slideshow on the terminal's alternate screen: each image is shown fitted to the window and centred, with a status line naming the file and its position in the list.
 
-| Key                              | Action                        |
-|----------------------------------|-------------------------------|
-| Right, Down, Space, `n`          | next image                    |
-| Left, Up, Backspace, `p`         | previous image                |
-| Home / End (also PgUp / PgDn)    | first / last image            |
-| `r`                              | redraw the slide from scratch |
-| Ctrl-Z                           | suspend (resume with `fg`)    |
-| `q`, Esc, Ctrl-C                 | quit                          |
+| Key                                 | Action                        |
+|-------------------------------------|-------------------------------|
+| Right, Down, PgDn, Space, `n`       | next image                    |
+| Left, Up, PgUp, Backspace, `p`      | previous image                |
+| Home / End                          | first / last image            |
+| `r`                                 | redraw the slide from scratch |
+| Ctrl-Z                              | suspend (resume with `fg`)    |
+| `q`, Esc, Ctrl-C, Ctrl-D            | quit                          |
 
 Navigation stops at the ends of the list rather than wrapping. Files that fail to load show their error in place and are skipped past with the same keys. `--animate` plays animated slides on terminals that support the kitty animation protocol.
 
-Under tmux, each slide change redraws by way of the pane's main screen -- a brief flash of the pane beneath, and `r` forces the same rebuild by hand. The flash buys reliability twice over: tmux silently drops passthrough sequences around pane redraws (kittyview also verifies each transmission's arrival over the protocol's reply channel, retries losses, and reports them in a diagnostics line on exit), and Ghostty releases through 1.3.1 render placeholder images delivered as in-place pane updates blank -- confirmed with the data verified present in the terminal -- while a full repaint renders them correctly. The same Ghostty releases can also render large placeholder images at the wrong size inside tmux (clipped or narrowed, [ghostty#13056](https://github.com/ghostty-org/ghostty/issues/13056)). Ghostty's nightly builds fix the rendering; kitty is unaffected.
+Under tmux, each slide is repainted with `tmux refresh-client` once it is drawn -- the same full client repaint that switching panes triggers, and nothing visible changes when it runs. It re-sends no image data: the image is already in the terminal's store, and the cells that place it are ordinary text in tmux's grid. The repaint is what makes the slide render at all on Ghostty releases through 1.3.1, which draw placeholder images delivered as an in-place pane update blank, or at the wrong size -- clipped or narrowed, [ghostty#13056](https://github.com/ghostty-org/ghostty/issues/13056) -- while a full repaint draws them correctly, confirmed with the data verified present in the terminal. Ghostty's nightly builds fix the rendering; kitty is unaffected.
+
+Where a repaint cannot reach, each slide change instead rebuilds by way of the pane's main screen, at the cost of a brief flash of the pane beneath: GNU screen has no equivalent command, and tmux nested inside another multiplexer would hand the outer layer the repaint as one more in-place update. `r` forces that rebuild by hand on any stack.
+
+Separately, tmux silently drops passthrough sequences around pane redraws, so kittyview verifies each transmission's arrival over the protocol's reply channel, retries losses, and reports them in a diagnostics line on exit.
 
 The slideshow leaves the terminal exactly as it found it, on every exit path: quitting, errors, panics, and fatal signals all restore the screen, the cursor, and the terminal mode, and delete the transmitted images so the terminal's image memory is returned. `kill -9` is the one exit nothing can clean up after -- `reset` recovers the terminal if it comes to that. Ctrl-Z suspends and resumes like any well-behaved fullscreen program.
 
