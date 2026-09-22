@@ -16,6 +16,14 @@
 //! terminals delete image data on a clear-screen, including data that was
 //! just transmitted and not yet revealed.
 //!
+//! Under tmux every draw ends by asking for a client repaint, because
+//! Ghostty through 1.3.1 renders placeholder cells delivered as an in-place
+//! pane update blank while a full repaint out of tmux's own grid renders
+//! them correctly -- which is why switching panes completes an image that
+//! came out clipped. `refresh-client` is that same repaint without the
+//! pane switch, and re-sends nothing: the image is already in the
+//! terminal's store and the cells are already in tmux's grid.
+//!
 //! Restoring the terminal is layered. A normal exit and an error both walk
 //! the same cleanup; a panic is caught by a hook that restores the terminal
 //! before the message prints, so it lands readable on the main screen; and
@@ -49,7 +57,9 @@ pub enum Key {
     Last,
     Quit,
     Suspend,
-    /// Redraw the current slide from scratch (the `r` key).
+    /// Redraw the current slide from scratch (the `r` key): the heavy
+    /// rebuild through the pane's main screen, for when the repaint every
+    /// draw already ends with was not enough.
     Redraw,
     /// Anything unrecognised; the show goes on.
     Other,
@@ -521,6 +531,7 @@ mod unix {
     use super::*;
     use crate::terminal::{self, tty};
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
     use std::sync::Once;
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -649,8 +660,50 @@ mod unix {
     /// Pause after leaving the alternate screen, so the multiplexer's
     /// redraw settles before the data goes out.
     const LEAVE_SETTLE: Duration = Duration::from_millis(250);
+    /// Pause after asking tmux to repaint, so the redraw is finished before
+    /// the next slide's transmission goes out through passthrough.
+    const REPAINT_SETTLE: Duration = Duration::from_millis(200);
     /// Draw attempts per slide under a multiplexer.
     const MAX_ATTEMPTS: u32 = 3;
+
+    /// Whether a tmux client repaint can stand in for the alternate-screen
+    /// cycle on this stack.
+    ///
+    /// `refresh-client` talks to the server named by `$TMUX` -- the
+    /// innermost tmux we are inside -- and repaints that client, which is
+    /// the whole job when tmux is the only layer between us and the
+    /// terminal. Nested inside another multiplexer the repaint's own
+    /// output arrives at the outer layer as an ordinary in-place pane
+    /// update, which is the very thing that renders blank, so those stacks
+    /// keep the cycle. So does screen, which has no equivalent command
+    /// and was never the stack this was field-tested on.
+    pub(super) fn can_repaint(mux_stack: &[Mux]) -> bool {
+        matches!(mux_stack, [Mux::Tmux(_)]) && std::env::var_os("TMUX").is_some()
+    }
+
+    /// Ask tmux to repaint the client, the way switching panes does.
+    ///
+    /// Nothing is re-sent: the image data is already in the terminal's
+    /// store, and the placeholder cells are ordinary text in tmux's grid.
+    /// They survive the repaint because their image ID rides a 256-colour
+    /// SGR, which a multiplexer relays verbatim (see
+    /// [`crate::placeholder::IdSpace::MuxSafe`]).
+    ///
+    /// Failure is ignored. A repaint that does not happen costs a slide
+    /// that may render blank, which is what the `r` key is for; there is
+    /// nothing better to do about it mid-slideshow, and the alternate
+    /// screen is no place for an error message.
+    fn repaint(mux_stack: &[Mux]) {
+        if !can_repaint(mux_stack) {
+            return;
+        }
+        let _ = Command::new("tmux")
+            .arg("refresh-client")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        std::thread::sleep(REPAINT_SETTLE);
+    }
 
     /// The state a draw reads and advances: where we are in the list, what
     /// is decoded, what is on screen, and whether the next draw still owes
@@ -664,7 +717,8 @@ mod unix {
         /// The next draw must rebuild from the main screen (the `r` key).
         force_cycle: bool,
         /// Whether the opening draw has happened; every draw after it
-        /// rebuilds from the main screen when under a multiplexer.
+        /// rebuilds from the main screen when under a multiplexer a
+        /// repaint cannot reach.
         first_draw_done: bool,
         draws: u32,
         verified_ok: u32,
@@ -678,15 +732,22 @@ mod unix {
     /// verifying under a multiplexer that the image data survived the trip
     /// and retrying when it did not.
     ///
-    /// Under a multiplexer, every draw after the first rebuilds from the
-    /// pane's main screen -- leave the alternate screen, let the redraw
-    /// settle, transmit, re-enter -- at the cost of a brief flash of the
-    /// underlying pane. Field-tested on Ghostty 1.3.1 + tmux: it is the
-    /// one draw shape that reliably ends in a rendered image there, where
-    /// in-place draws end blank even when the protocol's own arrival
-    /// check reports the data present. Each draw is still verified over
-    /// the reply channel and retried on a reported loss, and the `r` key
-    /// forces a rebuild by hand.
+    /// Every draw ends with a repaint, because Ghostty through 1.3.1
+    /// renders placeholder cells delivered as an in-place pane update
+    /// blank -- even when the protocol's own arrival check reports the
+    /// data present -- while a full repaint out of tmux's own grid renders
+    /// them correctly. Under plain tmux that repaint is `refresh-client`,
+    /// which is what switching panes does and costs nothing visible.
+    /// Where a repaint cannot reach (screen, or tmux nested in another
+    /// multiplexer) the draw falls back to rebuilding from the pane's main
+    /// screen -- leave the alternate screen, let the redraw settle,
+    /// transmit, re-enter -- at the cost of a brief flash. The rebuild is
+    /// also the last-attempt fallback when transmissions are being lost,
+    /// and the `r` key forces one by hand.
+    ///
+    /// The repaint comes after the arrival check, never before: tmux drops
+    /// passthrough while a redraw is pending, and the question would be
+    /// eaten along with it.
     ///
     /// When `state.pending_enter` is set, the draw carries the
     /// alternate-screen entry in its prelude (and clears the flag once
@@ -704,12 +765,17 @@ mod unix {
         } else {
             MAX_ATTEMPTS
         };
+        // Whether a draw was left standing, as opposed to the attempts
+        // running out with the transmission still reported lost.
+        let mut settled = false;
         for attempt in 0..attempts {
             if attempt > 0 {
                 std::thread::sleep(RETRY_PAUSE);
             }
             let cycle = !renderer.mux_stack.is_empty()
-                && (state.first_draw_done || state.force_cycle || attempt + 1 == MAX_ATTEMPTS);
+                && (state.force_cycle
+                    || attempt + 1 == MAX_ATTEMPTS
+                    || (state.first_draw_done && !can_repaint(renderer.mux_stack)));
             if cycle {
                 if attempt + 1 == MAX_ATTEMPTS {
                     state.fallback_draws += 1;
@@ -755,15 +821,31 @@ mod unix {
             // now is what a panic must delete.
             session.arm_emergency_restore(restore_sequence(renderer.mux_stack, state.current_id));
 
+            // The repaint after the loop must not land while this draw is
+            // still in flight: tmux drops passthrough while a redraw is
+            // pending, and every draw shape carries some -- an animation
+            // its frames and loop start, a message slide the delete of the
+            // image it replaces. The verification below pays that wait
+            // already, and its reply proves the drain outright; the two
+            // paths that skip verification have nothing, so they wait here
+            // instead, and only when a repaint will actually follow.
+            let settle_for_repaint = || {
+                if can_repaint(renderer.mux_stack) {
+                    std::thread::sleep(VERIFY_SETTLE);
+                }
+            };
+
             // Nothing to verify without a multiplexer, without an image,
             // or for animations (whose arrival has no cheap check).
             let Some(image_id) = drawn else {
-                state.force_cycle = false;
-                return Ok(());
+                settle_for_repaint();
+                settled = true;
+                break;
             };
             if renderer.mux_stack.is_empty() || animated {
-                state.force_cycle = false;
-                return Ok(());
+                settle_for_repaint();
+                settled = true;
+                break;
             }
             // The answer window doubles as input: a key pressed during it
             // is discarded with the reply -- worth it under a multiplexer.
@@ -772,19 +854,23 @@ mod unix {
             match session.ask(&request, VERIFY_TIMEOUT) {
                 None => {
                     state.verify_unanswered += 1;
-                    state.force_cycle = false;
-                    return Ok(());
+                    settled = true;
+                    break;
                 }
                 Some(reply) if verify_reply_says_arrived(Some(&reply)) => {
                     state.verified_ok += 1;
-                    state.force_cycle = false;
-                    return Ok(());
+                    settled = true;
+                    break;
                 }
                 Some(_) => state.lost_transmissions += 1,
             }
         }
-        state.unrecovered += 1;
+        if !settled {
+            state.unrecovered += 1;
+        }
         state.force_cycle = false;
+        // Whatever draw is standing gets the repaint that makes it render.
+        repaint(renderer.mux_stack);
         Ok(())
     }
 
@@ -1291,6 +1377,30 @@ mod tests {
         assert_eq!(
             out.matches(crate::placeholder::PLACEHOLDER).count(),
             20 * 10
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_lone_tmux_layer_can_be_repainted() {
+        use crate::slideshow::unix::can_repaint;
+        // `tmux refresh-client` repaints the client of the server named by
+        // $TMUX. That is the whole path to the terminal only when tmux is
+        // the single layer; anything outside it receives the repaint as an
+        // in-place pane update, which is what renders blank in the first
+        // place. These stay false whether or not we are inside tmux.
+        assert!(!can_repaint(&[]), "no multiplexer, nothing to repaint");
+        assert!(
+            !can_repaint(&[Mux::Screen(None)]),
+            "screen has no equivalent"
+        );
+        assert!(
+            !can_repaint(&[Mux::Tmux(None), Mux::Tmux(None)]),
+            "the outer tmux would see an in-place update"
+        );
+        assert!(
+            !can_repaint(&[Mux::Tmux(None), Mux::Screen(None)]),
+            "a repaint cannot reach past an outer layer"
         );
     }
 
