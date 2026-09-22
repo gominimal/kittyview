@@ -92,8 +92,11 @@ ask_yn "Type something at the prompt: no stray characters, no raw mode leftovers
 
 if [ -n "${TMUX:-}" ]; then
     echo
-    echo "(Running inside tmux: a brief flash of the pane between slides is"
-    echo " expected, and a diagnostics line should have printed on exit.)"
+    echo "(Running inside tmux: slides are repainted with 'tmux refresh-client',"
+    echo " so there should be NO flash of the underlying pane between slides."
+    echo " A diagnostics line should have printed on exit.)"
+    ask_yn "Did every slide render fully -- no clipped or partial images?" || true
+    ask_yn "Did slides change without flashing the pane underneath?" || true
     ask_yn "Did the exit diagnostics report 0 'never arrived'?" || true
 fi
 
